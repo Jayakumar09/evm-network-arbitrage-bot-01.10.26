@@ -23,6 +23,7 @@ if (import.meta.env.DEV) {
 
   ;(window as any).diagnoseUniswapV3Pools =
     diagnoseUniswapV3Pools
+
 }
 
 createRoot(document.getElementById('root')!).render(

@@ -2388,6 +2388,298 @@ export async function getCurrentBlockNumber(): Promise<number> {
 }
 
 // ======================================================
+// Executor Recent Activity
+//
+// Read-only Sepolia monitoring.
+// Reads recent Executor events without sending
+// transactions or requesting a signer.
+// ======================================================
+
+export type ExecutorActivityEvent = {
+  txHash: string
+  blockNumber: number
+  eventName: string
+
+  asset: string | null
+  amount: string | null
+  premium: string | null
+
+  tokenIn: string | null
+  tokenOut: string | null
+  amountIn: string | null
+  amountOut: string | null
+
+  amountBorrowed: string | null
+  profit: string | null
+
+  operationId: string | null
+  operationSuccess: boolean | null
+}
+
+const EXECUTOR_MONITOR_BLOCK_RANGE = 20
+
+export async function getExecutorRecentActivity():
+  Promise<ExecutorActivityEvent[]> {
+
+  console.log(
+    '========================================',
+  )
+
+  console.log(
+    '[EXECUTOR MONITOR] Reading recent activity...',
+  )
+
+  const provider =
+    await getProvider()
+
+  const network =
+    await provider.getNetwork()
+
+  const chainId =
+    Number(network.chainId)
+
+  if (
+    chainId !==
+    SEPOLIA_CHAIN_ID
+  ) {
+    throw new Error(
+      `Wrong network. Please switch MetaMask to ${NETWORK_NAME}.`,
+    )
+  }
+
+  const latestBlock =
+    await provider.getBlockNumber()
+
+  const fromBlock =
+    Math.max(
+      0,
+      latestBlock -
+        EXECUTOR_MONITOR_BLOCK_RANGE +
+        1,
+    )
+
+  console.log(
+    '[EXECUTOR MONITOR] Network:',
+    NETWORK_NAME,
+  )
+
+  console.log(
+    '[EXECUTOR MONITOR] Latest block:',
+    latestBlock,
+  )
+
+  console.log(
+    '[EXECUTOR MONITOR] Block range:',
+    `${fromBlock} - ${latestBlock}`,
+  )
+
+  const logs =
+    await provider.getLogs({
+      address:
+        EXECUTOR_CONTRACT_ADDRESS,
+
+      fromBlock,
+
+      toBlock:
+        latestBlock,
+    })
+
+  console.log(
+    '[EXECUTOR MONITOR] Executor logs:',
+    logs.length,
+  )
+
+  const activity:
+    ExecutorActivityEvent[] = []
+
+  for (
+    const log of logs
+  ) {
+
+    try {
+
+      const parsed =
+        EXECUTOR_EVENT_INTERFACE.parseLog({
+          topics:
+            log.topics,
+
+          data:
+            log.data,
+        })
+
+      if (!parsed) {
+        continue
+      }
+
+      const event: ExecutorActivityEvent = {
+
+        txHash:
+          log.transactionHash,
+
+        blockNumber:
+          log.blockNumber,
+
+        eventName:
+          parsed.name,
+
+        asset:
+          null,
+
+        amount:
+          null,
+
+        premium:
+          null,
+
+        tokenIn:
+          null,
+
+        tokenOut:
+          null,
+
+        amountIn:
+          null,
+
+        amountOut:
+          null,
+
+        amountBorrowed:
+          null,
+
+        profit:
+          null,
+
+        operationId:
+          null,
+
+        operationSuccess:
+          null,
+      }
+
+      // ==================================================
+      // FlashLoanExecuted
+      // ==================================================
+
+      if (
+        parsed.name ===
+        'FlashLoanExecuted'
+      ) {
+
+        event.asset =
+          parsed.args.asset as string
+
+        event.amount =
+          (
+            parsed.args.amount as bigint
+          ).toString()
+
+        event.premium =
+          (
+            parsed.args.premium as bigint
+          ).toString()
+      }
+
+      // ==================================================
+      // SwapExecuted
+      // ==================================================
+
+      else if (
+        parsed.name ===
+        'SwapExecuted'
+      ) {
+
+        event.tokenIn =
+          parsed.args.tokenIn as string
+
+        event.tokenOut =
+          parsed.args.tokenOut as string
+
+        event.amountIn =
+          (
+            parsed.args.amountIn as bigint
+          ).toString()
+
+        event.amountOut =
+          (
+            parsed.args.amountOut as bigint
+          ).toString()
+      }
+
+      // ==================================================
+      // ArbitrageProfit
+      // ==================================================
+
+      else if (
+        parsed.name ===
+        'ArbitrageProfit'
+      ) {
+
+        event.asset =
+          parsed.args.asset as string
+
+        event.amountBorrowed =
+          (
+            parsed.args.amountBorrowed as bigint
+          ).toString()
+
+        event.profit =
+          (
+            parsed.args.profit as bigint
+          ).toString()
+      }
+
+      // ==================================================
+      // OperationCompleted
+      // ==================================================
+
+      else if (
+        parsed.name ===
+        'OperationCompleted'
+      ) {
+
+        event.operationId =
+          (
+            parsed.args.operationId as bigint
+          ).toString()
+
+        event.operationSuccess =
+          Boolean(
+            parsed.args.success,
+          )
+      }
+
+      activity.push(
+        event,
+      )
+
+    } catch (error) {
+
+      console.warn(
+        '[EXECUTOR MONITOR] Unable to decode log:',
+        error,
+      )
+    }
+  }
+
+  activity.sort(
+    (a, b) =>
+      b.blockNumber -
+      a.blockNumber,
+  )
+
+  console.log(
+    '[EXECUTOR MONITOR] Decoded events:',
+    activity.length,
+  )
+
+  console.log(
+    '========================================',
+  )
+
+  return activity
+}
+
+// ======================================================
 // Get Aave Flash-Loan Premium
 // Reads the current Aave Pool premium in basis points.
 // ======================================================
