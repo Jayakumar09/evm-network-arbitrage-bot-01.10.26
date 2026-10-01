@@ -1,4 +1,9 @@
-import { useEffect, useState } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+} from 'react'
+
 import {
   BrowserProvider,
 } from 'ethers'
@@ -25,13 +30,26 @@ function TransactionStatus({
     status,
     setStatus,
   ] = useState<
-    'WAITING' | 'CONFIRMED' | 'FAILED'
+    'WAITING' | 'CONFIRMED' | 'FAILED' | 'REPLACED'
   >('WAITING')
 
   const [
     error,
     setError,
   ] = useState<string | null>(null)
+
+  const [
+    replacementHash,
+    setReplacementHash,
+  ] = useState<string | null>(null)
+
+  const onConfirmedRef =
+    useRef(onConfirmed)
+
+  useEffect(() => {
+    onConfirmedRef.current =
+      onConfirmed
+  }, [onConfirmed])
 
   // ====================================================
   // Wait For Blockchain Confirmation
@@ -59,10 +77,31 @@ function TransactionStatus({
             ethereum,
           )
 
-        const receipt =
-          await provider.waitForTransaction(
+        // ------------------------------------------------
+        // Load the submitted transaction
+        // ------------------------------------------------
+
+        const transaction =
+          await provider.getTransaction(
             transactionHash,
           )
+
+        if (!transaction) {
+          throw new Error(
+            'Transaction could not be found on the network.',
+          )
+        }
+
+        // ------------------------------------------------
+        // Wait for the transaction.
+        //
+        // ethers v6 can report a replacement through
+        // TRANSACTION_REPLACED when the original
+        // transaction is replaced.
+        // ------------------------------------------------
+
+        const receipt =
+          await transaction.wait()
 
         if (!mounted) {
           return
@@ -74,10 +113,17 @@ function TransactionStatus({
           )
         }
 
+        // ------------------------------------------------
+        // Transaction reverted
+        // ------------------------------------------------
+
         if (
           receipt.status !== 1
         ) {
-          setStatus('FAILED')
+
+          setStatus(
+            'FAILED',
+          )
 
           setError(
             'Transaction reverted on-chain.',
@@ -86,22 +132,78 @@ function TransactionStatus({
           return
         }
 
+        // ------------------------------------------------
+        // Transaction confirmed successfully
+        // ------------------------------------------------
+
         setStatus(
           'CONFIRMED',
         )
 
         setError(null)
 
-        if (onConfirmed) {
-            onConfirmed()
-          }
+        if (onConfirmedRef.current) {
+          onConfirmedRef.current()
+        }
+
       } catch (transactionError) {
 
         if (!mounted) {
           return
         }
 
-        setStatus('FAILED')
+        // ------------------------------------------------
+        // Handle ethers transaction replacement
+        // ------------------------------------------------
+
+        if (
+          transactionError &&
+          typeof transactionError === 'object' &&
+          'code' in transactionError &&
+          (transactionError as {
+            code?: string
+          }).code === 'TRANSACTION_REPLACED'
+        ) {
+
+          const replacementError =
+            transactionError as {
+              code?: string
+              cancelled?: boolean
+              reason?: string
+              replacement?: {
+                hash?: string
+              }
+            }
+
+          const replacedHash =
+            replacementError.replacement?.hash
+
+          if (replacedHash) {
+            setReplacementHash(
+              replacedHash,
+            )
+          }
+
+          setStatus(
+            'REPLACED',
+          )
+
+          setError(
+            replacementError.cancelled
+              ? 'Transaction was cancelled or replaced.'
+              : 'Transaction was replaced before confirmation.',
+          )
+
+          return
+        }
+
+        // ------------------------------------------------
+        // Normal confirmation failure
+        // ------------------------------------------------
+
+        setStatus(
+          'FAILED',
+        )
 
         setError(
           transactionError instanceof Error
@@ -119,7 +221,7 @@ function TransactionStatus({
 
   }, [
     transactionHash,
- ])
+  ])
 
   // ====================================================
   // Render
@@ -213,6 +315,49 @@ function TransactionStatus({
           <p className="mt-3 break-all font-mono text-sm text-slate-500">
             {transactionHash}
           </p>
+
+        </div>
+      )}
+
+      {/* ==================================================
+          Replaced
+          ================================================== */}
+
+      {status === 'REPLACED' && (
+
+        <div className="mt-4">
+
+          <div className="flex items-center gap-3">
+
+            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-amber-500/15 text-xs font-bold text-amber-400">
+              !
+            </span>
+
+            <p className="font-medium text-amber-400">
+              Transaction replaced
+            </p>
+
+          </div>
+
+          {error && (
+            <p className="mt-3 break-words text-sm text-slate-400">
+              {error}
+            </p>
+          )}
+
+          <p className="mt-3 break-all font-mono text-sm text-slate-500">
+            Original:
+            {' '}
+            {transactionHash}
+          </p>
+
+          {replacementHash && (
+            <p className="mt-2 break-all font-mono text-sm text-slate-500">
+              Replacement:
+              {' '}
+              {replacementHash}
+            </p>
+          )}
 
         </div>
       )}
