@@ -26,6 +26,7 @@ import {
   getExecutorOwner,
   getExecutorPaused,
   getFlashLoanTransactionResult,
+  getCurrentBlockNumber,
 } from '../services/blockchain'
 
 
@@ -52,6 +53,11 @@ type ExecutionState =
   | 'CONFIRMED'
   | 'FAILED'
 
+// ======================================================
+// Opportunity Stale Policy
+// ======================================================
+
+const MAX_OPPORTUNITY_BLOCK_AGE = 3
 
 // ======================================================
 // Token Decimals
@@ -813,6 +819,26 @@ function ExecutionPage() {
       // --------------------------------------------------
       // Opportunity Checks
       // --------------------------------------------------
+      const currentBlockNumber =
+        await getCurrentBlockNumber()
+
+      const blockAge =
+        currentBlockNumber -
+        opportunity.scanBlockNumber
+
+      console.log(
+        '[EXECUTION BLOCK AGE]',
+        {
+          scanBlockNumber:
+            opportunity.scanBlockNumber,
+          currentBlockNumber,
+          blockAge,
+        },
+      )
+
+      const isOpportunityStale =
+        blockAge >
+        MAX_OPPORTUNITY_BLOCK_AGE
 
       if (!opportunity.isProfitable) {
         setExecutionError(
@@ -822,7 +848,7 @@ function ExecutionPage() {
         return
       }
 
-      if (opportunity.isStale) {
+      if (isOpportunityStale) {
         setExecutionError(
           'Opportunity quote is stale. Scan again before execution.',
         )
