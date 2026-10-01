@@ -25,6 +25,8 @@ import {
   UNISWAP_V3_QUOTER_V2_ADDRESS,
   V2_ROUTER_ADDRESS,
   UNISWAP_V3_FACTORY_ADDRESS,
+  SEPOLIA_CHAIN_ID,
+  NETWORK_NAME,
 } from '../config/contracts'
 
 import { ERC20_ABI } from '../abi/erc20'
@@ -2331,6 +2333,39 @@ export async function getProvider(): Promise<BrowserProvider> {
   }
 
   return new BrowserProvider(ethereum)
+}
+
+// ======================================================
+// Verify Ethereum Sepolia Network
+// ======================================================
+
+export async function verifySepoliaNetwork(): Promise<void> {
+  const provider = await getProvider()
+
+  const network =
+    await provider.getNetwork()
+
+  const chainId =
+    Number(network.chainId)
+
+  console.log(
+    '[NETWORK CHECK] Chain ID:',
+    chainId,
+  )
+
+  if (
+    chainId !==
+    SEPOLIA_CHAIN_ID
+  ) {
+    throw new Error(
+      `Wrong network. Please switch MetaMask to ${NETWORK_NAME}.`,
+    )
+  }
+
+  console.log(
+    '[NETWORK CHECK] Network:',
+    NETWORK_NAME,
+  )
 }
 
 // ======================================================

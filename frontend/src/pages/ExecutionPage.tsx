@@ -27,6 +27,7 @@ import {
   getExecutorPaused,
   getFlashLoanTransactionResult,
   getCurrentBlockNumber,
+  verifySepoliaNetwork,
 } from '../services/blockchain'
 
 
@@ -761,6 +762,30 @@ function ExecutionPage() {
       }
 
       setExecutionError(null)
+
+      // --------------------------------------------------
+      // Network Check
+      // --------------------------------------------------
+
+      try {
+
+        await verifySepoliaNetwork()
+
+      } catch (networkError) {
+
+        console.error(
+          '[EXECUTION DEBUG] Network check failed:',
+          networkError,
+        )
+
+        setExecutionError(
+          networkError instanceof Error
+            ? networkError.message
+            : 'Please switch MetaMask to Ethereum Sepolia.',
+        )
+
+        return
+      }
 
       // --------------------------------------------------
       // Wallet / Executor Access Check
