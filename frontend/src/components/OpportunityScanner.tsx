@@ -5,11 +5,14 @@ import {
 } from '../context/ArbitrageContext'
 
 import {
+  AbiCoder,
   formatUnits,
   parseUnits,
 } from 'ethers'
 
 import {
+  estimateFlashLoanArbitrage,
+  getProvider,
   getUniswapV3Quote,
   getV2Quote,
 } from '../services/blockchain'
@@ -282,16 +285,6 @@ import type {
                 const dexFees = 0
 
                 // ==================================================
-                // Gas
-                //
-                // Gas will be measured separately during execution.
-                // Keep scanner estimate at zero rather than inventing
-                // a gas price.
-                // ==================================================
-
-                const estimatedGas = 0
-
-                // ==================================================
                 // Minimum Output Protection
                 //
                 // Keep 1% slippage protection on both swaps.
@@ -342,18 +335,6 @@ import type {
                     : 0
 
                 // ==================================================
-                // Estimated Net Profit
-                // ==================================================
-
-                const estimatedNetProfit =
-                  grossProfit -
-                  flashLoanFee -
-                  dexFees -
-                  estimatedGas -
-                  slippageCost -
-                  safetyBuffer
-
-                // ==================================================
                 // Minimum On-Chain Profit
                 //
                 // IMPORTANT:
@@ -377,6 +358,223 @@ import type {
                   )
 
                 // ==================================================
+                // Build Executor Parameters for Gas Estimation
+                //
+                // Use the same parameter structure expected by the
+                // deployed Executor. Gas estimation is performed with
+                // the current quoted outputs and minimum-profit floor.
+                // No transaction is submitted here.
+                // ==================================================
+
+                const firstDexValue =
+                  routeFirstDex === 'UNISWAP_V3'
+                    ? 0
+                    : 1
+
+                const minProfitRaw =
+                  parseUnits(
+                    minProfit.toFixed(6),
+                    6,
+                  )
+
+                const abiCoder =
+                  AbiCoder.defaultAbiCoder()
+
+                const operationData =
+                  abiCoder.encode(
+                    [
+                      'uint8',
+                      'address',
+                      'address',
+                      'uint24',
+                      'uint256',
+                      'uint256',
+                      'uint256',
+                    ],
+                    [
+                      firstDexValue,
+                      USDC_ADDRESS,
+                      WETH_ADDRESS,
+                      Number(uniFee),
+                      minOut1Raw,
+                      minOut2Raw,
+                      minProfitRaw,
+                    ],
+                  )
+
+                const params =
+                  abiCoder.encode(
+                    [
+                      'uint8',
+                      'bytes',
+                    ],
+                    [
+                      1,
+                      operationData,
+                    ],
+                  )
+
+                // ==================================================
+                // Real Executor Gas Estimation
+                //
+                // IMPORTANT:
+                //
+                // If gross profit is already <= 0, there is no reason
+                // to ask the Executor to estimate gas for this route.
+                //
+                // This preserves the previous scanner behavior:
+                // an obviously losing route is marked unprofitable
+                // without performing unnecessary Executor simulation.
+                //
+                // For positive gross-profit routes, perform the real
+                // Executor gas estimation exactly as before.
+                //
+                // estimateFlashLoanArbitrage() only estimates gas;
+                // it does not submit a transaction.
+                // ==================================================
+
+                let estimatedGas = 0
+                let gasEstimationSucceeded = false
+
+                if (grossProfit <= 0) {
+                  console.log(
+                    '[LIVE SCANNER] Gas estimation skipped:',
+                    'gross profit <= 0',
+                  )
+                } else {
+                  try {
+                    const gasUnits =
+                      await estimateFlashLoanArbitrage(
+                        USDC_ADDRESS,
+                        amountIn,
+                        params,
+                      )
+
+                    const provider =
+                      await getProvider()
+
+                    const feeData =
+                      await provider.getFeeData()
+
+                    const gasPrice =
+                      feeData.gasPrice ?? 0n
+
+                    if (gasPrice <= 0n) {
+                      throw new Error(
+                        'Gas price unavailable.',
+                      )
+                    }
+
+                    const gasCostWei =
+                      gasUnits * gasPrice
+
+                    const gasCostEth =
+                      Number(
+                        formatUnits(
+                          gasCostWei,
+                          18,
+                        ),
+                      )
+
+                    let ethUsdPrice = 0
+
+                    try {
+                      const response =
+                        await fetch(
+                          'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd',
+                          {
+                            method: 'GET',
+                            headers: {
+                              Accept: 'application/json',
+                            },
+                            cache: 'no-store',
+                          },
+                        )
+
+                      if (response.ok) {
+                        const data =
+                          await response.json()
+
+                        const price =
+                          Number(
+                            data?.ethereum?.usd,
+                          )
+
+                        if (
+                          Number.isFinite(price) &&
+                          price > 0
+                        ) {
+                          ethUsdPrice = price
+                        }
+                      }
+                    } catch {
+                      console.warn(
+                        '[LIVE SCANNER] ETH/USD price unavailable.',
+                      )
+                    }
+
+                    if (ethUsdPrice <= 0) {
+                      throw new Error(
+                        'ETH/USD price unavailable for gas valuation.',
+                      )
+                    }
+
+                    estimatedGas =
+                      gasCostEth * ethUsdPrice
+
+                    gasEstimationSucceeded = true
+
+                    console.log(
+                      '[LIVE SCANNER] Estimated gas units:',
+                      gasUnits.toString(),
+                    )
+
+                    console.log(
+                      '[LIVE SCANNER] Gas price:',
+                      formatUnits(
+                        gasPrice,
+                        'gwei',
+                      ),
+                      'gwei',
+                    )
+
+                    console.log(
+                      '[LIVE SCANNER] Gas cost ETH:',
+                      gasCostEth,
+                    )
+
+                    console.log(
+                      '[LIVE SCANNER] ETH/USD:',
+                      ethUsdPrice,
+                    )
+
+                    console.log(
+                      '[LIVE SCANNER] Estimated gas USDC:',
+                      estimatedGas,
+                    )
+                  } catch (error) {
+                    console.warn(
+                      '[LIVE SCANNER] Gas estimation failed:',
+                      error,
+                    )
+
+                    estimatedGas = 0
+                  }
+                }
+
+                // ==================================================
+                // Estimated Net Profit
+                // ==================================================
+
+                const estimatedNetProfit =
+                      grossProfit -
+                      flashLoanFee -
+                      dexFees -
+                      estimatedGas -
+                      slippageCost -
+                      safetyBuffer
+
+                // ==================================================
                 // Profit Percentage
                 // ==================================================
 
@@ -393,6 +591,7 @@ import type {
                 // ==================================================
 
                 const isProfitable =
+                  gasEstimationSucceeded &&
                   estimatedNetProfit >
                   minProfit
 
