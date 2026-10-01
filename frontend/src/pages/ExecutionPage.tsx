@@ -28,6 +28,8 @@ import {
   getFlashLoanTransactionResult,
   getCurrentBlockNumber,
   verifySepoliaNetwork,
+  getV2Quote,
+  getUniswapV3Quote,
 } from '../services/blockchain'
 
 
@@ -340,6 +342,253 @@ function buildDexArbitrageParams(
       operationData,
     ],
   )
+}
+
+// ======================================================
+// Execution-Time Fresh Route Quote
+// ======================================================
+//
+// Purpose:
+// - Re-quote the exact two-hop route immediately before
+//   simulation.
+// - Do NOT replace the scanner's existing safety floors.
+// - Block execution if the fresh route no longer satisfies
+//   those safety floors.
+//
+// firstDex:
+//   0 = Uniswap V3 -> V2-Compatible DEX
+//   1 = V2-Compatible DEX -> Uniswap V3
+//
+// minOut1 = existing first-hop safety floor
+// minOut2 = existing second-hop safety floor
+// minProfit = existing final profit safety floor
+// ======================================================
+
+async function validateFreshExecutionQuote(
+  firstDex: number,
+  tokenInAddress: string,
+  tokenOutAddress: string,
+  amount: bigint,
+  uniFee: number,
+  minOut1: string,
+  minOut2: string,
+  minProfit: string,
+): Promise<{
+  amountOut1Raw: bigint
+  amountOut2Raw: bigint
+}> {
+
+  if (amount <= 0n) {
+    throw new Error(
+      'Fresh quote requires a flash loan amount greater than zero.',
+    )
+  }
+
+  // ----------------------------------------------------
+  // Convert existing safety floors to raw token units
+  // ----------------------------------------------------
+
+  const tokenInDecimals =
+    getTokenDecimals(
+      tokenInAddress,
+    )
+
+  const tokenOutDecimals =
+    getTokenDecimals(
+      tokenOutAddress,
+    )
+
+  const minOut1Raw =
+    toTokenUnits(
+      minOut1,
+      tokenOutDecimals,
+    )
+
+  const minOut2Raw =
+    toTokenUnits(
+      minOut2,
+      tokenInDecimals,
+    )
+
+  const minProfitRaw =
+    toTokenUnits(
+      minProfit,
+      tokenInDecimals,
+    )
+
+  // ----------------------------------------------------
+  // Fresh first-hop quote
+  // ----------------------------------------------------
+
+  let amountOut1Raw: bigint
+
+  if (firstDex === 0) {
+
+    // Uniswap V3 -> V2
+    amountOut1Raw =
+      await getUniswapV3Quote(
+        tokenInAddress,
+        tokenOutAddress,
+        amount,
+        uniFee,
+      )
+
+  } else if (firstDex === 1) {
+
+    // V2 -> Uniswap V3
+    amountOut1Raw =
+      await getV2Quote(
+        amount,
+        [
+          tokenInAddress,
+          tokenOutAddress,
+        ],
+      )
+
+  } else {
+
+    throw new Error(
+      'Invalid DEX route for fresh execution quote.',
+    )
+  }
+
+  console.log(
+    '[FRESH QUOTE] First-hop output raw:',
+    amountOut1Raw.toString(),
+  )
+
+  console.log(
+    '[FRESH QUOTE] First-hop minimum raw:',
+    minOut1Raw.toString(),
+  )
+
+  // ----------------------------------------------------
+  // First-hop safety check
+  // ----------------------------------------------------
+
+  if (
+    amountOut1Raw <
+    minOut1Raw
+  ) {
+
+    throw new Error(
+      'Fresh first-hop quote is below the existing minimum output. Execution blocked.',
+    )
+  }
+
+  // ----------------------------------------------------
+  // Fresh second-hop quote
+  // ----------------------------------------------------
+
+  let amountOut2Raw: bigint
+
+  if (firstDex === 0) {
+
+    // Uniswap V3 -> V2
+    amountOut2Raw =
+      await getV2Quote(
+        amountOut1Raw,
+        [
+          tokenOutAddress,
+          tokenInAddress,
+        ],
+      )
+
+  } else {
+
+    // V2 -> Uniswap V3
+    amountOut2Raw =
+      await getUniswapV3Quote(
+        tokenOutAddress,
+        tokenInAddress,
+        amountOut1Raw,
+        uniFee,
+      )
+  }
+
+  console.log(
+    '[FRESH QUOTE] Second-hop output raw:',
+    amountOut2Raw.toString(),
+  )
+
+  console.log(
+    '[FRESH QUOTE] Second-hop minimum raw:',
+    minOut2Raw.toString(),
+  )
+
+  // ----------------------------------------------------
+  // Second-hop safety check
+  // ----------------------------------------------------
+
+  if (
+    amountOut2Raw <
+    minOut2Raw
+  ) {
+
+    throw new Error(
+      'Fresh second-hop quote is below the existing minimum output. Execution blocked.',
+    )
+  }
+
+  // ----------------------------------------------------
+  // Fresh final profitability check
+  // ----------------------------------------------------
+
+  const minimumFinalAmount =
+    amount +
+    minProfitRaw
+
+  console.log(
+    '[FRESH QUOTE] Loan amount raw:',
+    amount.toString(),
+  )
+
+  console.log(
+    '[FRESH QUOTE] Fresh final output raw:',
+    amountOut2Raw.toString(),
+  )
+
+  console.log(
+    '[FRESH QUOTE] Minimum profit raw:',
+    minProfitRaw.toString(),
+  )
+
+  console.log(
+    '[FRESH QUOTE] Required final output raw:',
+    minimumFinalAmount.toString(),
+  )
+
+  if (
+    amountOut2Raw <
+    minimumFinalAmount
+  ) {
+
+    throw new Error(
+      'Fresh route no longer satisfies the minimum-profit requirement. Execution blocked.',
+    )
+  }
+
+  // ----------------------------------------------------
+  // Fresh gross profit
+  // ----------------------------------------------------
+
+  const freshGrossProfitRaw =
+    amountOut2Raw -
+    amount
+
+  console.log(
+    '[FRESH QUOTE] Fresh gross profit raw:',
+    freshGrossProfitRaw.toString(),
+  )
+
+  console.log(
+    '[FRESH QUOTE] Fresh route validation PASSED',
+  )
+
+  return {
+    amountOut1Raw,
+    amountOut2Raw,
+  }
 }
 
 
@@ -1004,7 +1253,57 @@ function ExecutionPage() {
         }
 
         // ------------------------------------------------
+        // Execution-Time Fresh Quote
+        //
+        // Re-quote the exact two-hop route immediately
+        // before constructing the transaction parameters.
+        //
+        // The existing scanner safety floors remain
+        // authoritative:
+        //   - minOut1
+        //   - minOut2
+        //   - minProfit
+        // ------------------------------------------------
+
+        console.log(
+          '[FRESH QUOTE] Starting execution-time route validation...',
+        )
+
+        const freshQuote =
+          await validateFreshExecutionQuote(
+            firstDex,
+            tokenInAddress,
+            tokenOutAddress,
+            amount,
+            opportunity.uniFee,
+            opportunity.minOut1,
+            opportunity.minOut2,
+            opportunity.minProfit,
+          )
+
+        console.log(
+          '[FRESH QUOTE] First-hop output:',
+          formatUnits(
+            freshQuote.amountOut1Raw,
+            getTokenDecimals(tokenOutAddress),
+          ),
+        )
+
+        console.log(
+          '[FRESH QUOTE] Final output:',
+          formatUnits(
+            freshQuote.amountOut2Raw,
+            tokenInDecimals,
+          ),
+        )
+
+
+        // ------------------------------------------------
         // Build Flash Loan Parameters
+        //
+        // IMPORTANT:
+        // Keep the existing scanner safety floors.
+        // Do not replace them with the fresh quote.
         // ------------------------------------------------
 
         const params =
