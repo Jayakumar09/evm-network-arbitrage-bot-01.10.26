@@ -3,203 +3,56 @@
 
   
 
-## Executor (Aave/Balancer + Uniswap/Sushi)
-
-Basically, contract for MEV: takes flash loans, runs arbitrage between DEXes, does liquidations. Everything is ready, deploy and use.
-
-  
-
-What it does:
-
-  
-
-**Essentially:** contract takes tokens on loan (flash loan), exchanges them for other tokens through DEX, then returns the loan + fee, extracting profit from price differences.
-
-  
-
-**Important:** the whole scheme is built so that **the entire process happens within one transaction of one contract** — from taking the loan to repayment and getting profit.
-
-  
-
--  **Aave V3 flashLoanSimple**: takes flash loan and calls `executeOperation(...)` callback, where the strategy is executed.
-
--  **Balancer Vault flashLoan**: multi-asset flash loan and `receiveFlashLoan(...)` callback.
-
--  **DEX cycle (arbitrage)**: 2 swaps (Uniswap V3 ↔ SushiSwap V2) with `minOut` and `minProfit` checks.
-
--  **Liquidation (Aave V3)**: `liquidationCall(...)` with `minCollateralOut` check.
-
--  **Withdrawals**: `withdrawEth(...)`, `withdrawToken(...)` + emergency `emergencyTokenRecovery(...)`.
-
-  
-  
-  
-
-How to run:
-
-  
-
-Owner contract — you are the owner, call functions, it does flash loans and strategies in one transaction.
-
-  
-
-**Quick scheme:**
-
-1. Create contract in Remix: https://remix.ethereum.org/ or https://portable-remixide.org
-
-  
-
-According to Screenshot:
-
-- 1- Create .sol file and paste contract in editor field [myBot.sol](myBot.sol)
-
-- 2- Compilation tab > version 0.8.20 > Compile button
-
-- 3- Deploy tab > Select Executor contract > press Deploy Contract
-
-![Contract creation instructions](https://i.ibb.co/HTRkw29n/instructions.png)
-
-  
-
-2. Top up contract balance (0.5-1 ETH)
-
-  
-
-3. Run `Launch()` — it takes loan and performs operations
-
-  
-
-4. If need to withdraw profit — press `withdrawEth()` or `withdrawToken()`
-
-  
-
-Simple start: `Launch()` — loan amount is calculated as contract_balance * 200.
-
-  
-  
-
--  **Aave flash loan**: `executeFlashLoanArbitrage(asset, amount, params)`
-
--  **Balancer flash loan**: `executeBalancerFlashLoan(tokens, amounts, userData)`
-
-  
-
-`params/userData` are encoded as:
-
-  
-
--  `operationType`:
-
--  `1` — DEX cycle
-
--  `2` — liquidation
-
-  
-
-Data formats:
-
-  
-
-### DEX cycle (operationType = 1)
-
-  
-
-```solidity
-
-(uint8 firstDex, address tokenIn, address tokenOut, uint24 uniFee, uint256 minOut1, uint256 minOut2, uint256 minProfit)
-
-```
-
-  
-
--  `firstDex`: `0` = UniswapV3→Sushi, `1` = Sushi→UniswapV3
-
--  `uniFee`: 500 / 3000 / 10000
-
--  `minOut1/minOut2`: slippage protection at each step
-
--  `minProfit`: minimum profit (otherwise transaction reverts)
-
-  
-
-### Liquidation (operationType = 2)
-
-  
-
-```solidity
-
-(address user, address debtAsset, address collateralAsset, uint256 debtToCover, bool receiveAToken, uint256 minCollateralOut)
-
-```
-
-  
-
-Important to know:
-
-  
-
-- Don't expect easy money. Everything depends on the market — gas, slippage, competition, positions.
-
-  
-
-About ETH:
-
-  
-
-0.5-1 ETH will last a long time — for gas, if need to handle ETH/WETH, and just in case.
-
-  
-
-Roughly about profit: depends on loan size and market situation. For arbitrage usually 0.01-0.1% of amount, for liquidations — percentage of position. With 100 ETH loan might get 0.01-0.1 ETH profit, but this is very approximate and without guarantees — market changes every second.
-
-  
-
-Good luck!
-
-![Visitors](https://visitor-badge.laobi.icu/badge?page_id=README_EN_PAGE_ID)
-
-# Flash Loan Arbitrage Bot
-
-EVM Network Arbitrage / Flash Loan Bot for testing DEX arbitrage on the
-Ethereum Sepolia testnet.
-
-## Project Status
-
-**Current milestone: Sepolia flash-loan arbitrage execution successfully
-completed end-to-end.**
-
-The current system has successfully completed a real flash-loan
-arbitrage transaction using the deployed `Executor` contract.
-
-### Verified flow
-
-``` text
-Live DEX Quotes
-      ↓
-Opportunity Scanner
-      ↓
-Select Profitable Direction
-      ↓
-Encode Flash Loan Parameters
-      ↓
-Aave Flash Loan Simulation
-      ↓
-Gas Estimation
-      ↓
-Real Flash Loan Transaction
-      ↓
-SushiSwap V2
-      ↓
-Uniswap V3
-      ↓
-Aave Flash Loan Repayment
-      ↓
-Arbitrage Profit
-      ↓
-Transaction Event Decoding
-      ↓
-Frontend Transaction Confirmation
-```
+## Executor (Aave + V2-compatible DEX + Uniswap V3)
+
+This project is an Ethereum Sepolia testnet flash-loan arbitrage system.
+The current verified workflow uses Aave V3 flash loans and a two-leg
+arbitrage route between a V2-compatible DEX and Uniswap V3.
+
+The current project is **testnet-only**. Successful Sepolia execution does
+not imply production profitability or production readiness.
+
+### Current tested workflow
+
+1. Connect MetaMask to Ethereum Sepolia.
+2. Start the frontend with `npm run dev`.
+3. Open `/scanner`.
+4. Enter the flash-loan amount and scan fresh Sepolia quotes.
+5. Review the selected profitable route on `/opportunity`.
+6. Prepare execution on `/execution`.
+7. Review the minimum outputs and minimum profit.
+8. Confirm the in-app execution dialog.
+9. The frontend performs an Aave flash-loan `staticCall` pre-flight simulation.
+10. If simulation succeeds, MetaMask requests the real transaction.
+11. Confirm the Sepolia transaction in MetaMask.
+12. Verify the transaction receipt and decoded Executor events.
+13. Verify the resulting Executor token balance in Remix if required.
+14. Withdraw the realized USDC to the owner wallet using `/withdrawals`.
+
+### Important
+
+- Do **not** use the old `Launch()` workflow for the current checkpoint.
+- The current tested path is `executeFlashLoanArbitrage(...)`.
+- Keep the deployed Executor address and frontend configuration synchronized.
+- Test one feature at a time and do not redeploy a working Executor without
+  an explicit reason.
+
+### Current protection model
+
+The arbitrage operation uses:
+
+- Aave flash-loan repayment validation
+- token/asset validation
+- DEX route selection
+- `minOut1`
+- `minOut2`
+- `minProfit`
+- owner authorization
+- pause protection
+- reentrancy protection on withdrawal paths
+
+The frontend also performs a pre-flight `staticCall` before submitting the
+real transaction.
 
 ------------------------------------------------------------------------
 
@@ -243,13 +96,13 @@ The project is currently intended for testing only.
 ### Executor Contract
 
 ``` text
-0x3aE7c844CAe182bBb7dfe31CeE3C4C1B729160D2
+0x4b5Bf061141E49cf8007E148e03B28eE71C3D25a
 ```
 
 ### Owner
 
 ``` text
-0x02cb851d094AE4648FB528F9E62095356cB214BE
+0x6D1212b63621675397fFDB26C5ba6fcd76ce9904
 ```
 
 ### Current Contract State
@@ -257,6 +110,9 @@ The project is currently intended for testing only.
 ``` text
 paused() = false
 ```
+
+The deployed Executor is the existing Sepolia contract used by the
+frontend. No new deployment was performed for this checkpoint.
 
 ------------------------------------------------------------------------
 
@@ -290,12 +146,12 @@ paused() = false
 
 # Verified Arbitrage Direction
 
-The currently tested profitable direction is:
+The latest successful frontend execution used:
 
 ``` text
 USDC
   ↓
-SushiSwap V2
+V2-Compatible DEX
   ↓
 WETH
   ↓
@@ -304,45 +160,31 @@ Uniswap V3
 USDC
 ```
 
-The reverse direction:
-
-``` text
-USDC
-  ↓
-Uniswap V3
-  ↓
-WETH
-  ↓
-SushiSwap V2
-  ↓
-USDC
-```
-
-was unprofitable at the tested Sepolia prices.
-
-Therefore:
+with:
 
 ``` text
 firstDex = 1
+uniFee   = 3000
 ```
 
-means the first swap uses the V2-compatible DEX (SushiSwap), followed by
-Uniswap V3.
+The scanner checks both directions and selects the best profitable route from
+fresh Sepolia quotes.
 
 ``` text
 dexSelector 0 = Uniswap V3
-dexSelector 1 = SushiSwap V2
+dexSelector 1 = V2-Compatible DEX
 ```
 
 ------------------------------------------------------------------------
 
-# Live Flash Loan Test
+# Latest Successful Real Flash Loan Transaction
+
+The latest verified frontend execution was a real Sepolia transaction.
 
 ## Test Amount
 
 ``` text
-1,000,000 raw USDC
-= 1.000000 USDC
+10 USDC
 ```
 
 ## Flash Loan Parameters
@@ -350,73 +192,50 @@ dexSelector 1 = SushiSwap V2
 ``` text
 operationType = 1
 firstDex      = 1
-tokenIn       = USDC
-tokenOut      = WETH
+tokenIn       = Aave Sepolia USDC
+tokenOut      = Sepolia WETH
 uniFee        = 3000
-minOut1       = 0
-minOut2       = 0
-minProfit     = 0
 ```
 
-These zero protection values were used for controlled Sepolia testing
-only.
+The frontend generated non-zero `minOut1`, `minOut2`, and `minProfit`
+protection values for this execution.
 
-They are **not production-safe settings**.
-
-------------------------------------------------------------------------
-
-# Verified Quotes
-
-## SushiSwap V2
+## Transaction
 
 ``` text
-1,000,000 USDC
-→ 262,505,899,501 WETH
-```
-
-## Uniswap V3
-
-The tested round-trip produced approximately:
-
-``` text
-262,501,212,164 WETH
-→ 4,664,569 USDC
-```
-
-The exact execution result is determined by the actual on-chain
-transaction and events.
-
-------------------------------------------------------------------------
-
-# Successful Real Transaction
-
-Transaction hash:
-
-``` text
-0x971371de9bd941d29be13342e74a910376c7005ac6f82593a2a2c4bbb7c5a0f7
+0x2db62f2b8572ebccedc72d2f6e5f07f08e419f0378f05b6e507c8473c3cd5b8f
 ```
 
 ## Receipt
 
 ``` text
 Status: 1
-Gas used: 413,145
-Effective gas price: 2,604,391,432 wei
-Gas cost: 1,075,991,298,173,640 wei
+Gas used: 475,950
+Effective gas price: 2.444003269 gwei
+Gas cost: 0.00116322335588055 SepoliaETH
 ```
 
-Approximate gas cost:
+## Verified Execution Result
 
 ``` text
-0.0010759913 SepoliaETH
+Flash loan:        10 USDC
+Aave premium:      0.005000 USDC
+Arbitrage profit:  222.071851 USDC
+Executor USDC:     222.071851 USDC
+Executor WETH:     0
 ```
 
-------------------------------------------------------------------------
+The frontend calculated the realized result as:
 
-# Decoded Flash Loan Result
+``` text
+Gross profit:       222.076851 USDC
+Aave premium:         0.005000 USDC
+Net before gas:     222.071851 USDC
+Gas cost:             3.121580 USD
+Final net profit:   218.950271 USD
+```
 
-The frontend transaction decoder successfully detected these Executor
-events:
+The frontend decoder detected:
 
 ``` text
 SwapExecuted
@@ -426,54 +245,54 @@ FlashLoanExecuted
 OperationCompleted
 ```
 
-### Flash Loan
+The operation was reported as successful with Operation ID 3.
+
+## On-chain Balance Verification
+
+After the successful transaction, Remix returned:
 
 ``` text
-Borrowed:
-1,000,000 raw USDC
-
-Premium:
-500 raw USDC
-
-Required repayment:
-1,000,500 raw USDC
+getTokenBalance(Aave Sepolia USDC)
+= 222071851
 ```
 
-### Arbitrage Profit
+Because Aave Sepolia USDC uses 6 decimals:
 
 ``` text
-3,664,569 raw USDC
-= 3.664569 USDC
+222071851 raw
+= 222.071851 USDC
 ```
 
-### Final Executor USDC Balance
+## Profit Withdrawal Verification
+
+The full Executor USDC balance was subsequently withdrawn to the owner wallet.
+
+After withdrawal:
 
 ``` text
-3,664,069 raw USDC
-= 3.664069 USDC
+Executor USDC = 0
 ```
 
-The relationship is:
+This was independently confirmed with the Remix `getTokenBalance(address)`
+call.
+
+The frontend Withdrawal page also refreshed to:
 
 ``` text
-Arbitrage profit       3.664569 USDC
-- Aave premium         0.000500 USDC
------------------------------------
-Final USDC             3.664069 USDC
+Executor USDC = 0.00 USDC
+No USDC Available
 ```
 
-### Final Executor WETH Balance
+The owner wallet then displayed approximately:
 
 ``` text
-0.000000318444220802 WETH
+999.625 USDC
 ```
 
-### Operation
+This completes the tested execution → balance verification → withdrawal
+cycle on Sepolia.
 
-``` text
-Operation ID: 3
-Operation success: true
-```
+------------------------------------------------------------------------
 
 ------------------------------------------------------------------------
 
@@ -547,82 +366,62 @@ quotes.
 This project is **not production-ready**.
 
 The current successful transaction proves the end-to-end mechanics on
-Sepolia, but several safety improvements are still required before any
-production deployment.
+Ethereum Sepolia, but additional safety and execution-cost improvements are
+still required before considering production deployment.
 
 ## Current limitations
 
-### 1. Gas cost is not yet fully integrated into scanner profitability
+### 1. Scanner gas-cost integration
 
-The scanner currently uses a placeholder gas value during opportunity
-calculation.
+The scanner currently uses a placeholder gas value during pre-execution
+opportunity calculation.
 
-The actual successful transaction consumed:
+The latest successful transaction consumed:
 
 ``` text
-413,145 gas
+475,950 gas
 ```
 
-Future work should use a real gas estimate before declaring an
+The frontend records the actual transaction gas cost after confirmation,
+but the scanner should use a real gas estimate before declaring an
 opportunity executable.
 
-### 2. Aave premium should be read dynamically
+### 2. Dynamic Aave premium
 
-The current test used:
+The scanner should eventually obtain the current Aave premium dynamically
+instead of relying on an assumed flash-loan fee during opportunity
+calculation.
 
-``` text
-500 raw units
-```
+### 3. Slippage and minimum-profit validation
 
-for a 1,000,000 raw-unit flash loan.
+The latest successful 10-USDC frontend execution used non-zero `minOut1`,
+`minOut2`, and `minProfit` values.
 
-The frontend/scanner should eventually obtain the current Aave premium
-dynamically instead of relying on a hard-coded assumption.
+These protections are part of the tested execution path, but they should
+continue to be hardened against quote changes and execution-time state
+changes.
 
-### 3. `minOut1` and `minOut2`
-
-The successful diagnostic transaction used:
-
-``` text
-minOut1 = 0
-minOut2 = 0
-```
-
-This is acceptable only for controlled testing.
-
-Production execution must use meaningful minimum-output protections.
-
-### 4. `minProfit`
-
-The successful diagnostic transaction used:
-
-``` text
-minProfit = 0
-```
-
-This must not be used for production arbitrage.
-
-A real minimum-profit threshold should account for:
-
--   Aave premium
--   DEX fees
--   Slippage
--   Gas cost
--   Safety margin
-
-### 5. Prices can change
+### 4. Quote freshness
 
 The tested route was profitable at the observed Sepolia prices.
 
 It does **not** mean that:
 
 ``` text
-SushiSwap → Uniswap V3
+V2-Compatible DEX → Uniswap V3
 ```
 
 will always be profitable.
 
 Every execution must use fresh quotes and revalidate the opportunity.
+
+### 5. Testnet only
+
+Sepolia liquidity, prices, gas behavior, and token balances are not
+representative of production Ethereum conditions.
+
+No production deployment should be inferred from the successful Sepolia
+tests.
 
 ------------------------------------------------------------------------
 
@@ -648,7 +447,7 @@ The project follows these development rules:
 From the frontend directory:
 
 ``` powershell
-cd D:\FlashLoan\evm-network-arbitrage-bot\frontend
+cd D:\DevProjects\completed\evm-network-arbitrage-bot-01.10.26\frontend
 npm install
 npm run build
 ```
@@ -668,7 +467,7 @@ is a performance optimization item, not a build failure.
 # Development Server
 
 ``` powershell
-cd D:\FlashLoan\evm-network-arbitrage-bot\frontend
+cd D:\DevProjects\completed\evm-network-arbitrage-bot-01.10.26\frontend
 npm run dev
 ```
 
@@ -704,38 +503,50 @@ Live quote scanning                 ✓
 Route selection                     ✓
 Parameter encoding                  ✓
 Aave flash loan simulation          ✓
-Gas estimation                      ✓
 Real flash loan execution           ✓
-SushiSwap V2 swap                   ✓
+V2-compatible DEX swap              ✓
 Uniswap V3 swap                     ✓
 Aave repayment                      ✓
 Arbitrage profit                    ✓
 Transaction receipt                 ✓
 Event decoding                      ✓
 Frontend confirmation               ✓
-Execution state handling            ✓
+On-chain profit verification        ✓
+USDC withdrawal                     ✓
+Executor balance reset to zero      ✓
+TypeScript check                    ✓
+Vite production build              ✓
 
 ================================================
-CURRENT PROFITABLE TEST ROUTE
+LATEST SUCCESSFUL TEST
 ================================================
 
-USDC → SushiSwap V2 → WETH
+10 USDC flash loan
+
+USDC → V2-Compatible DEX → WETH
     → Uniswap V3 → USDC
+
+Realized arbitrage profit:
+222.071851 USDC
+
+Final net profit after recorded gas:
+218.950271 USD
 
 ================================================
 EXECUTOR
 ================================================
 
-0x3aE7c844CAe182bBb7dfe31CeE3C4C1B729160D2
+0x4b5Bf061141E49cf8007E148e03B28eE71C3D25a
 
 ================================================
 NEXT DEVELOPMENT PHASE
 ================================================
 
 Safety hardening:
+- Real gas-cost integration in scanner
 - Dynamic Aave premium
-- Real gas-cost integration
-- Safer minOut values
+- Quote freshness / revalidation
+- Further minOut validation
 - Dynamic minProfit
 - Final net-profit calculation
 - Improved execution-result UI
@@ -748,7 +559,7 @@ Safety hardening:
 
 GitHub:
 
-https://github.com/Jayakumar09/evm-network-arbitrage-bot
+https://github.com/Jayakumar09/evm-network-arbitrage-bot-01.10.26
 
 This README represents the current Sepolia testing checkpoint and should
 be updated as the project moves into the safety-hardening phase.
