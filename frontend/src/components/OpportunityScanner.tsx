@@ -12,6 +12,7 @@ import {
 
 import {
   estimateFlashLoanArbitrage,
+  getAaveFlashLoanPremiumBps,
   getProvider,
   getUniswapV3Quote,
   getV2Quote,
@@ -95,7 +96,7 @@ import type {
 
             setIsScanning(true)
             setScanError(null)
-           
+
             try {
               // ==================================================
               // Convert user amount to USDC raw units
@@ -106,6 +107,19 @@ import type {
                   loanAmount,
                   6,
                 )
+
+              // ==================================================
+              // LIVE Aave Flash Loan Premium
+              // ==================================================
+
+              const flashLoanPremiumBps =
+                await getAaveFlashLoanPremiumBps()
+
+              console.log(
+                '[LIVE SCANNER] Aave flash-loan premium:',
+                flashLoanPremiumBps,
+                'bps',
+              )
 
               console.log(
                 '========================================',
@@ -135,9 +149,10 @@ import type {
               // ==================================================
 
               const evaluateRoute = async (
-                routeFirstDex: DexType,
-                routeSecondDex: DexType,
-              ): Promise<ArbitrageOpportunity> => {
+                  routeFirstDex: DexType,
+                  routeSecondDex: DexType,
+                  flashLoanPremiumBps: number,
+                ): Promise<ArbitrageOpportunity> => {
                 console.log(
                   '========================================',
                 )
@@ -253,7 +268,7 @@ import type {
                     amountOut2Raw,
                     6,
                   )
-                  
+
                 // ==================================================
                 // Profit calculation
                 // ==================================================
@@ -269,11 +284,23 @@ import type {
                   loanAmountNumber
 
                 // ==================================================
-                // Aave Sepolia Flash Loan Premium
+                // LIVE Aave flash-loan premium
                 // ==================================================
+                //
+                // FLASHLOAN_PREMIUM_TOTAL is returned in basis points.
+                //
+                // Example:
+                //   5 bps = 5 / 10,000 = 0.0005 = 0.05%
+                //
+                // Do NOT hard-code the premium here.
+                //
 
                 const flashLoanFee =
-                  loanAmountNumber * 0.0005
+                  loanAmountNumber *
+                  (
+                    flashLoanPremiumBps /
+                    10_000
+                  )
 
                 // ==================================================
                 // DEX Fees
@@ -719,6 +746,7 @@ import type {
                 await evaluateRoute(
                   'V2_COMPATIBLE',
                   'UNISWAP_V3',
+                  flashLoanPremiumBps,
                 )
 
               console.log(
@@ -734,6 +762,7 @@ import type {
                 await evaluateRoute(
                   'UNISWAP_V3',
                   'V2_COMPATIBLE',
+                  flashLoanPremiumBps,
                 )
 
               // ==================================================

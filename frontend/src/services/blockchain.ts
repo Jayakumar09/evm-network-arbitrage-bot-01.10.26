@@ -18,6 +18,7 @@ import type {
 
 import {
   EXECUTOR_CONTRACT_ADDRESS,
+  AAVE_POOL_ADDRESS,
   USDC_ADDRESS,
   CIRCLE_USDC_ADDRESS,
   WETH_ADDRESS,
@@ -44,6 +45,15 @@ const EXECUTOR_READ_ABI = [
   'function owner() view returns (address)',
   'function paused() view returns (bool)',
   'function getTokenBalance(address tokenAddress) view returns (uint256)',
+]
+
+// ======================================================
+// Aave Pool Read ABI
+// Used to read the current flash-loan premium.
+// ======================================================
+
+const AAVE_POOL_READ_ABI = [
+  'function FLASHLOAN_PREMIUM_TOTAL() view returns (uint128)',
 ]
 
 // ======================================================
@@ -2321,6 +2331,43 @@ export async function getProvider(): Promise<BrowserProvider> {
   }
 
   return new BrowserProvider(ethereum)
+}
+
+// ======================================================
+// Get Aave Flash-Loan Premium
+// Reads the current Aave Pool premium in basis points.
+// ======================================================
+
+export async function getAaveFlashLoanPremiumBps(): Promise<number> {
+  const provider = await getProvider()
+
+  const pool = new Contract(
+    AAVE_POOL_ADDRESS,
+    AAVE_POOL_READ_ABI,
+    provider,
+  )
+
+  const premiumRaw =
+    await pool.FLASHLOAN_PREMIUM_TOTAL()
+
+  const premiumBps = Number(premiumRaw)
+
+  if (
+    !Number.isFinite(premiumBps) ||
+    premiumBps < 0
+  ) {
+    throw new Error(
+      'Invalid Aave flash-loan premium returned by Sepolia Pool.',
+    )
+  }
+
+  console.log(
+    '[AAVE PREMIUM] Current flash-loan premium:',
+    premiumBps,
+    'bps',
+  )
+
+  return premiumBps
 }
 
 // ======================================================
