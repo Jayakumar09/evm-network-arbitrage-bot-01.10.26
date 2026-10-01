@@ -38,6 +38,7 @@ export interface ArbitrageOpportunity {
 
   isProfitable: boolean
   isStale: boolean
+  scanBlockNumber: number
 
   status: ArbitrageStatus
 }

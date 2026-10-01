@@ -13,6 +13,7 @@ import {
 import {
   estimateFlashLoanArbitrage,
   getAaveFlashLoanPremiumBps,
+  getCurrentBlockNumber,
   getProvider,
   getUniswapV3Quote,
   getV2Quote,
@@ -114,6 +115,9 @@ import type {
 
               const flashLoanPremiumBps =
                 await getAaveFlashLoanPremiumBps()
+
+              const scanBlockNumber =
+                await getCurrentBlockNumber()
 
               console.log(
                 '[LIVE SCANNER] Aave flash-loan premium:',
@@ -720,9 +724,9 @@ import type {
 
                   minProfit:
                     minProfit.toFixed(6),
-
                   isProfitable,
                   isStale: false,
+                  scanBlockNumber,
 
                   status:
                     'OPPORTUNITY_FOUND',
