@@ -516,6 +516,11 @@ function ExecutionPage() {
     setCheckingContract,
   ] = useState(true)
 
+  const [
+    currentBlockNumber,
+    setCurrentBlockNumber,
+  ] = useState<number | null>(null)
+
 
   // ====================================================
   // Load Executor Access
@@ -559,6 +564,18 @@ function ExecutionPage() {
 
 
         setIsPaused(paused)
+
+
+        const currentBlock =
+          await getCurrentBlockNumber()
+
+        if (!mounted) {
+          return
+        }
+
+        setCurrentBlockNumber(
+          currentBlock,
+        )
 
       } catch (error) {
 
@@ -819,28 +836,39 @@ function ExecutionPage() {
       // --------------------------------------------------
       // Opportunity Checks
       // --------------------------------------------------
-      const currentBlockNumber =
+
+      const executionCurrentBlockNumber =
         await getCurrentBlockNumber()
 
+      setCurrentBlockNumber(
+        executionCurrentBlockNumber,
+      )
+
+
       const blockAge =
-        currentBlockNumber -
+        executionCurrentBlockNumber -
         opportunity.scanBlockNumber
+
 
       console.log(
         '[EXECUTION BLOCK AGE]',
         {
           scanBlockNumber:
             opportunity.scanBlockNumber,
-          currentBlockNumber,
+          currentBlockNumber:
+            executionCurrentBlockNumber,
           blockAge,
         },
       )
+
 
       const isOpportunityStale =
         blockAge >
         MAX_OPPORTUNITY_BLOCK_AGE
 
+
       if (!opportunity.isProfitable) {
+
         setExecutionError(
           'Opportunity is not profitable.',
         )
@@ -848,7 +876,9 @@ function ExecutionPage() {
         return
       }
 
+
       if (isOpportunityStale) {
+
         setExecutionError(
           'Opportunity quote is stale. Scan again before execution.',
         )
@@ -1887,6 +1917,23 @@ function ExecutionPage() {
           }
         }
 
+  // ====================================================
+  // Opportunity Block Freshness
+  // ====================================================
+
+  const blockAge =
+    currentBlockNumber !== null
+      ? currentBlockNumber -
+        opportunity.scanBlockNumber
+      : null
+
+
+  const isBlockAgeStale =
+    blockAge !== null &&
+    blockAge >
+      MAX_OPPORTUNITY_BLOCK_AGE
+
+
 
   // ====================================================
   // Execution Button Disabled
@@ -2077,7 +2124,6 @@ function ExecutionPage() {
 
         </div>
 
-
        {/* ==================================================
           Safety Parameters
           ================================================== */}
@@ -2116,6 +2162,31 @@ function ExecutionPage() {
           />
 
           <ExecutionRow
+            label="Scan Block"
+            value={
+              opportunity.scanBlockNumber.toString()
+            }
+          />
+
+          <ExecutionRow
+            label="Current Block"
+            value={
+              currentBlockNumber !== null
+                ? currentBlockNumber.toString()
+                : 'Loading...'
+            }
+          />
+
+          <ExecutionRow
+            label="Block Age"
+            value={
+              blockAge !== null
+                ? `${blockAge} block${blockAge === 1 ? '' : 's'}`
+                : 'Loading...'
+            }
+          />
+
+          <ExecutionRow
             label="Estimated Gas"
             value={`$${opportunity.estimatedGas}`}
           />
@@ -2123,14 +2194,18 @@ function ExecutionPage() {
           <ExecutionRow
             label="Quote Status"
             value={
-              opportunity.isStale
+              isBlockAgeStale
                 ? 'STALE'
-                : 'CURRENT'
+                : currentBlockNumber === null
+                  ? 'CHECKING...'
+                  : 'CURRENT'
             }
             valueClassName={
-              opportunity.isStale
+              isBlockAgeStale
                 ? 'text-red-400'
-                : 'text-emerald-400'
+                : currentBlockNumber === null
+                  ? 'text-amber-400'
+                  : 'text-emerald-400'
             }
           />
 
