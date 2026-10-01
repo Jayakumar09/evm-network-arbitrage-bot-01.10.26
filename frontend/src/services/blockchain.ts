@@ -2334,6 +2334,25 @@ export async function getProvider(): Promise<BrowserProvider> {
 }
 
 // ======================================================
+// Get Current Ethereum Block
+// Read-only diagnostic for Sepolia.
+// ======================================================
+
+export async function getCurrentBlockNumber(): Promise<number> {
+  const provider = await getProvider()
+
+  const blockNumber =
+    await provider.getBlockNumber()
+
+  console.log(
+    '[LIVE BLOCK] Current block:',
+    blockNumber,
+  )
+
+  return blockNumber
+}
+
+// ======================================================
 // Get Aave Flash-Loan Premium
 // Reads the current Aave Pool premium in basis points.
 // ======================================================
