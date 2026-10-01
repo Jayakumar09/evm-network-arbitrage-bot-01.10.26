@@ -35,6 +35,10 @@ function Header() {
         path: '/transactions',
       },
       {
+        name: 'Executor Monitor',
+        path: '/executor-monitor',
+      },
+      {
         name: 'Withdrawals',
         path: '/withdrawals',
       },

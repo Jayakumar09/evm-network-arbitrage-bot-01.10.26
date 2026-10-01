@@ -9,6 +9,7 @@ import ExecutionPage from './pages/ExecutionPage'
 import TransactionsPage from './pages/TransactionsPage'
 import ContractPage from './pages/ContractPage'
 import WithdrawalsPage from './pages/WithdrawalsPage'
+import ExecutorMonitorPage from './pages/ExecutorMonitorPage'
 
 import { ArbitrageProvider } from './context/ArbitrageContext'
 
@@ -28,6 +29,7 @@ function App() {
               <Route path="/transactions" element={<TransactionsPage />} />
               <Route path="/withdrawals" element={<WithdrawalsPage />} />
               <Route path="/contract" element={<ContractPage />} />
+              <Route path="/executor-monitor" element={<ExecutorMonitorPage />} />
             </Routes>
           </main>
         </div>
