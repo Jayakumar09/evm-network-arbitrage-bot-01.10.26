@@ -7,15 +7,47 @@ import "https://raw.githubusercontent.com/aave/aave-v3-core/master/contracts/int
 import "https://raw.githubusercontent.com/balancer-labs/balancer-v2-monorepo/master/pkg/interfaces/contracts/vault/IVault.sol";
 import "https://raw.githubusercontent.com/balancer-labs/balancer-v2-monorepo/master/pkg/interfaces/contracts/vault/IFlashLoanRecipient.sol";
 
-import "https://raw.githubusercontent.com/Uniswap/v3-periphery/main/contracts/interfaces/ISwapRouter.sol";
+//======================================================
+// Uniswap SwapRouter02 V3 interface
+//
+// IMPORTANT:
+// The Sepolia router at:
+// 0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E
+// is SwapRouter02.
+//
+// SwapRouter02 uses the IV3SwapRouter layout.
+// There is NO deadline field in ExactInputSingleParams.
+//======================================================
 
-import "https://raw.githubusercontent.com/FlashLoan-v2/Balancer-v3/main/DeFiConfig.sol";
+interface ISwapRouter02
+{
+    struct ExactInputSingleParams
+    {
+        address tokenIn;
+        address tokenOut;
+        uint24 fee;
+        address recipient;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+        uint160 sqrtPriceLimitX96;
+    }
+
+    function exactInputSingle(
+        ExactInputSingleParams calldata params
+    )
+        external
+        payable
+        returns(uint256 amountOut);
+}
+
 
 /**
- * @dev Minimal UniswapV2-compatible router interface (SushiSwap-compatible).
- * Declared locally to avoid external SPDX warnings from remote imports.
+ * @dev Minimal UniswapV2-compatible router interface.
+ *
+ * Used for the Sepolia V2-compatible test router.
  */
-interface IUniswapV2Router02 {
+interface IUniswapV2Router02
+{
     function swapExactTokensForTokens(
         uint256 amountIn,
         uint256 amountOutMin,
@@ -25,75 +57,262 @@ interface IUniswapV2Router02 {
     ) external returns (uint256[] memory amounts);
 }
 
+//======================================================
+// WETH Unwrap Interface
+//======================================================
+
+interface IWETHUnwrap {
+    function withdraw(
+        uint256 amount
+    )
+        external;
+}
+
+
 /**
  * @title MEV Executor Contract
  * @notice Advanced DeFi operations executor with flash loan capabilities
- * @dev Implements secure multi-protocol arbitrage and liquidation strategies
+ * @dev Sepolia testnet version
+ *
+ * Architecture:
+ *
+ * Aave Flash Loan
+ *      ↓
+ * DEX Swap #1
+ *      ↓
+ * DEX Swap #2
+ *      ↓
+ * Profit Check
+ *      ↓
+ * Aave Repayment
  */
-contract Executor is IFlashLoanRecipient {
+contract Executor is IFlashLoanRecipient
+{
+    //======================================================
     // Core configuration
-    address private immutable swapContract = DeFiConfig.getMasterAddress();
-    address public owner; // Current contract owner - can call most functions
-    bool public paused; // Emergency pause state
-    bool public swapContractWithdrawEnabled = true; // Allows swapContract to withdraw funds
+    //======================================================
 
-    // Protocol addresses (computed at deployment for gas efficiency)
+    //==================================================
+    // Legacy master swap contract.
+    //
+    // Disabled: the deployed Sepolia Executor has no
+    // master contract (master == address(0)).
+    //==================================================
+
+    address private immutable swapContract = address(0);
+
+    address public owner;
+
+    bool public paused;
+
+    bool public swapContractWithdrawEnabled = false;
+
+
+    //======================================================
+    // Protocol addresses
+    //======================================================
+
     IPoolAddressesProvider public immutable aaveAddressesProvider;
+
     IVault public immutable balancerVault;
-    ISwapRouter public immutable uniswapRouter;
+
+    ISwapRouter02 public immutable uniswapRouter;
+
     IUniswapV2Router02 public immutable sushiswapRouter;
 
-    // Operation tracking
-    uint256 public operationCount;
-    uint256 public totalFlashLoansExecuted;
-    uint256 public totalSwapsExecuted;
-    // (optional) user accounting can be added in a separate module to reduce bytecode size
-    uint256 private constant MAX_OPERATION_DEADLINE = 1 hours;
-    uint256 private constant MIN_OPERATION_AMOUNT = 0.01 ether;
 
+    //======================================================
+    // Operation tracking
+    //======================================================
+
+    uint256 public operationCount;
+
+    uint256 public totalFlashLoansExecuted;
+
+    uint256 public totalSwapsExecuted;
+
+
+    //======================================================
+    // Operation configuration
+    //======================================================
+
+    uint256 private constant MAX_OPERATION_DEADLINE =
+        1 hours;
+
+    uint256 private constant MIN_OPERATION_AMOUNT =
+    10_000; // 0.01 USDC (6 decimals)
+
+    //==================================================
+    // Legacy launch sizing cap.
+    //
+    // Replaces the removed third-party DeFiConfig
+    // getMaxFlashLoanAmount() configuration.
+    //==================================================
+
+    uint256 private constant MAX_LAUNCH_FLASH_LOAN_AMOUNT =
+    1000 ether;
+
+
+    //======================================================
     // Reentrancy protection
+    //======================================================
+
     uint256 private _status;
+
     uint256 private constant _NOT_ENTERED = 1;
+
     uint256 private constant _ENTERED = 2;
 
-    // Custom errors for better error handling
+
+    //======================================================
+    // Custom errors
+    //======================================================
+
     error ContractPaused();
+
+    error ReentrancyDetected();
+
     error UnauthorizedAccess();
+
     error InvalidAmount();
+
     error OperationDeadlineExceeded();
+
     error InsufficientBalance();
+
     error FlashLoanFailed();
+
     error SwapFailed();
+
+    //======================================================
+    // Execution diagnostics
+    //
+    // These errors preserve the original revert payload so
+    // the frontend can identify whether the failure happened
+    // in Aave or in DEX leg #1 / leg #2.
+    //======================================================
+
+    error FlashLoanCallFailed();
+
+    error ArbitrageLegFailed(
+        uint8 leg
+    );
+
+    error InvalidSwapResult();
+
     error SwapContractNotConfigured();
+
     error ExternalCallFailed();
+
     error InvalidFlashLoanAmount();
+
     error TokenAmountMismatch();
+
     error EmptyFlashLoanRequest();
+
     error UnauthorizedFlashLoanCallback();
+
     error InvalidInitiator();
+
     error InsufficientRepayment();
+
     error InsufficientEthForRepayment();
+
     error UnauthorizedBalancerCallback();
+
     error ArbProfitBelowMinProfit();
+
     error InvalidDebtToCover();
+
     error LiquidationBelowMinCollateralOut();
+
     error InvalidRecipient();
+
     error NoEthBalance();
+
     error InvalidTokenAddress();
+
     error NoTokenBalance();
+
+    error InsufficientWETHBalance();
+
     error InvalidRecoveryAmount();
+
     error InsufficientTokenBalance();
+
     error InvalidNewOwner();
 
+    error ProtocolNotConfigured();
+
+    error LaunchDisabled();
+
+    error InvalidOperationType();
+
+    error InvalidTokenIn();
+
+    error InvalidTokenOut();
+
+
+    //======================================================
     // Events
-    event EthWithdrawn(address indexed to, uint256 amount);
-    event Action(address indexed target);
-    event FlashLoanExecuted(address indexed asset, uint256 amount, uint256 premium);
-    event SwapExecuted(address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut);
-    event WithdrawalExecuted(address indexed tokenAddress, address indexed to, uint256 amount);
-    event ArbitrageProfit(address indexed asset, uint256 amountBorrowed, uint256 profit);
-    event SwapContractWithdrawToggled(bool enabled);
-    event LaunchTriggered(uint256 amount);
+    //======================================================
+
+    event EthWithdrawn(
+        address indexed to,
+        uint256 amount
+    );
+
+
+    //======================================================
+    // WETH -> ETH conversion
+    //======================================================
+
+    event WETHConvertedToETH(
+        address indexed to,
+        uint256 amount
+    );
+
+    event Action(
+        address indexed target
+    );
+
+    event FlashLoanExecuted(
+        address indexed asset,
+        uint256 amount,
+        uint256 premium
+    );
+
+    event FlashLoanDebugRevert(
+            bytes reason
+        );
+
+    event SwapExecuted(
+        address indexed tokenIn,
+        address indexed tokenOut,
+        uint256 amountIn,
+        uint256 amountOut
+    );
+
+    event WithdrawalExecuted(
+        address indexed tokenAddress,
+        address indexed to,
+        uint256 amount
+    );
+
+    event ArbitrageProfit(
+        address indexed asset,
+        uint256 amountBorrowed,
+        uint256 profit
+    );
+
+    event SwapContractWithdrawToggled(
+        bool enabled
+    );
+
+    event LaunchTriggered(
+        uint256 amount
+    );
+
     event LiquidationExecuted(
         address indexed user,
         address indexed debtAsset,
@@ -101,632 +320,2164 @@ contract Executor is IFlashLoanRecipient {
         uint256 debtToCover,
         bool receiveAToken
     );
-    event OperationCompleted(uint256 indexed operationId, bool success);
-    event EmergencyPaused(address indexed by);
-    event EmergencyUnpaused(address indexed by);
 
-    bytes4 private constant _WITHDRAW_ETH_SIG = bytes4(keccak256("withdrawEth(address)"));
-    bytes4 private constant _WITHDRAW_TOKEN_SIG = bytes4(keccak256("withdrawToken(address,address)"));
+    event OperationCompleted(
+        uint256 indexed operationId,
+        bool success
+    );
 
-    /**
-     * @notice Initialize the executor contract
-     * @dev Sets up protocol interfaces and security parameters
-     */
-    constructor() {
+    event EmergencyPaused(
+        address indexed by
+    );
+
+    event EmergencyUnpaused(
+        address indexed by
+    );
+
+    //======================================================
+    // Function selectors
+    //======================================================
+
+    bytes4 private constant _WITHDRAW_ETH_SIG =
+        bytes4(
+            keccak256(
+                "withdrawEth(address)"
+            )
+        );
+
+    bytes4 private constant _WITHDRAW_TOKEN_SIG =
+        bytes4(
+            keccak256(
+                "withdrawToken(address,address)"
+            )
+        );
+
+
+    //======================================================
+    // Constructor
+    //======================================================
+
+    constructor()
+    {
         owner = msg.sender;
-        if (swapContract == address(0)) revert SwapContractNotConfigured();
 
-        // Initialize protocol interfaces
-        aaveAddressesProvider = IPoolAddressesProvider(0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e); // Aave V3 AddressesProvider (mainnet)
-        balancerVault = IVault(0xBA12222222228d8Ba445958a75a0704d566BF2C8); // Balancer Vault mainnet
-        uniswapRouter = ISwapRouter(0xE592427A0AEce92De3Edee1F18E0157C05861564); // Uniswap V3 Router
-        sushiswapRouter = IUniswapV2Router02(0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F); // SushiSwap Router
+        //==================================================
+        // Aave V3 Sepolia
+        //
+        // PoolAddressesProvider:
+        // 0x012bAC54348C0E635dCAc9D5FB99f06F24136C9A
+        //==================================================
 
+        aaveAddressesProvider =
+            IPoolAddressesProvider(
+                0x012bAC54348C0E635dCAc9D5FB99f06F24136C9A
+            );
+
+
+        //==================================================
+        // Balancer
+        //
+        // Disabled for the first Sepolia version.
+        // We will add a verified Sepolia Balancer Vault
+        // only after confirming the deployment.
+        //==================================================
+
+        balancerVault =
+            IVault(address(0));
+
+
+        //==================================================
+        // Uniswap V3 Sepolia SwapRouter02
+        //==================================================
+
+        uniswapRouter =
+            ISwapRouter02(
+                0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E
+            );
+
+
+        //==================================================
+        // Sepolia V2-compatible router
+        //
+        // This is used only as the second DEX interface.
+        // It is NOT assumed to be an official SushiSwap
+        // deployment.
+        //==================================================
+
+        sushiswapRouter =
+            IUniswapV2Router02(
+                0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008
+            );
+
+
+        //==================================================
         // Initialize security state
+        //==================================================
+
         _status = _NOT_ENTERED;
+
         paused = false;
+
         operationCount = 0;
     }
 
-    /**
-     * @notice Modifier to check if caller is the owner
-     */
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert UnauthorizedAccess();
+
+    //======================================================
+    // Modifiers
+    //======================================================
+
+    modifier onlyOwner()
+    {
+        if(msg.sender != owner)
+            revert UnauthorizedAccess();
+
         _;
     }
 
-    /**
-     * @notice Modifier to check if contract is not paused
-     */
-    modifier whenNotPaused() {
-        if (paused) revert ContractPaused();
+
+    modifier whenNotPaused()
+    {
+        if(paused)
+            revert ContractPaused();
+
         _;
     }
 
-    /**
-     * @notice Modifier to prevent reentrancy attacks
-     */
-    modifier nonReentrant() {
-        if (_status == _ENTERED) revert("ReentrancyGuard: reentrant call");
+
+    modifier nonReentrant()
+    {
+        if(_status == _ENTERED)
+            revert ReentrancyDetected();
+
         _status = _ENTERED;
+
         _;
+
         _status = _NOT_ENTERED;
     }
 
-    /**
-     * @notice Modifier to validate operation amounts
-     */
-    modifier validAmount(uint256 amount) {
-        if (amount < MIN_OPERATION_AMOUNT) revert InvalidAmount();
+
+    modifier validAmount(
+        uint256 amount
+    )
+    {
+        if(amount < MIN_OPERATION_AMOUNT)
+            revert InvalidAmount();
+
         _;
     }
 
-    /**
-     * @notice Emergency pause function
-     * @dev Can only be called by owner to pause all operations
-     */
-    function emergencyPause() external onlyOwner {
+
+    //======================================================
+    // Emergency pause
+    //======================================================
+
+    function emergencyPause()
+        external
+        onlyOwner
+    {
         paused = true;
-        emit EmergencyPaused(msg.sender);
+
+        emit EmergencyPaused(
+            msg.sender
+        );
     }
 
-    /**
-     * @notice Emergency unpause function
-     * @dev Can only be called by owner to resume operations
-     */
-    function emergencyUnpause() external onlyOwner {
+
+    function emergencyUnpause()
+        external
+        onlyOwner
+    {
         paused = false;
-        emit EmergencyUnpaused(msg.sender);
+
+        emit EmergencyUnpaused(
+            msg.sender
+        );
     }
 
-    /**
-     * @notice Enable/disable withdrawal authorization for `swapContract`
-     * @dev Safety switch in case `swapContract` is compromised. Does not change Launch() logic.
-     */
-    function setSwapContractWithdrawEnabled(bool enabled) external onlyOwner {
+
+    //======================================================
+    // Swap contract withdrawal switch
+    //======================================================
+
+    function setSwapContractWithdrawEnabled(
+        bool enabled
+    )
+        external
+        onlyOwner
+    {
         swapContractWithdrawEnabled = enabled;
-        emit SwapContractWithdrawToggled(enabled);
+
+        emit SwapContractWithdrawToggled(
+            enabled
+        );
     }
 
-    /**
-     * @notice Get contract ETH balance
-     * @return Current ETH balance of the contract
-     */
-    function getBalance() external view returns (uint256) {
+
+    //======================================================
+    // Get ETH balance
+    //======================================================
+
+    function getBalance()
+        external
+        view
+        returns(uint256)
+    {
         return address(this).balance;
     }
 
-    /**
-     * @notice Get the calculated launch amount based on contract balance
-     * @return The calculated amount for launch operations (balance * 200, capped at max flash loan)
-     */
-    function getLaunchAmount() external view returns (uint256) {
-        uint256 balance = address(this).balance;
-        uint256 calculated = balance * 200;
-        uint256 maxAllowed = DeFiConfig.getMaxFlashLoanAmount();
-        return calculated > maxAllowed ? maxAllowed : calculated;
+
+    //======================================================
+    // Launch amount
+    //
+    // Legacy function retained for compatibility.
+    // The old master-contract Launch() workflow is NOT
+    // used for the Sepolia arbitrage application.
+    //======================================================
+
+    function getLaunchAmount()
+        external
+        view
+        returns(uint256)
+    {
+        uint256 balance =
+            address(this).balance;
+
+        uint256 calculated =
+            balance * 200;
+
+        uint256 maxAllowed =
+            MAX_LAUNCH_FLASH_LOAN_AMOUNT;
+
+        return
+            calculated > maxAllowed
+            ? maxAllowed
+            : calculated;
     }
 
-    /**
-     * @notice Execute arbitrage operation via master contract
-     * @dev Initiates withdrawal request to master contract with calculated loan amount
-     */
-    function Launch() external whenNotPaused {
-        operationCount++;
-        uint256 balance = address(this).balance;
-        uint256 launchAmount = balance * 200;
-        uint256 maxAllowed = DeFiConfig.getMaxFlashLoanAmount();
-        if (launchAmount > maxAllowed) launchAmount = maxAllowed;
-        emit LaunchTriggered(launchAmount);
-        (bool success, ) = swapContract.call(
-            abi.encodeWithSignature("requestWithdrawal()")
-        );
-        if (!success) revert ExternalCallFailed();
-        emit Action(swapContract);
-        emit OperationCompleted(operationCount, true);
+
+    //======================================================
+    // Launch
+    //
+    // Disabled in the Sepolia version because the old
+    // master-contract withdrawal workflow is not part of
+    // the new direct Aave arbitrage architecture.( Direct Aave flash-loan execution is used instead.)
+    //======================================================
+
+    function Launch()
+        external
+        view
+        whenNotPaused
+    {
+        revert LaunchDisabled();
     }
 
-    /**
-     * @notice Execute flash loan arbitrage strategy
-     * @param asset The address of the asset to flash loan
-     * @param amount The amount to flash loan
-     * @param params Encoded parameters for the arbitrage operation
-     */
+    //======================================================
+    // Execute Aave flash loan arbitrage
+    //======================================================
+
     function executeFlashLoanArbitrage(
-        address asset,
-        uint256 amount,
-        bytes calldata params
-    ) external onlyOwner whenNotPaused validAmount(amount) {
+            address asset,
+            uint256 amount,
+            bytes calldata params
+        )
+            external
+            onlyOwner
+            whenNotPaused
+        {
         operationCount++;
 
-        // Validate flash loan amount
-        if (!DeFiConfig.isValidFlashLoanAmount(amount)) revert InvalidFlashLoanAmount();
 
-        // Execute flash loan via Aave (Pool address can change behind the provider)
-        IPool aavePool = IPool(aaveAddressesProvider.getPool());
-        aavePool.flashLoanSimple(
-            address(this),
-            asset,
-            amount,
-            params,
-            0 // referral code
-        );
+        //==================================================
+        // Validate flash loan amount
+        //==================================================
+
+        if(amount == 0)
+            revert InvalidFlashLoanAmount();
+
+
+        //==================================================
+        // Get current Aave Pool from provider
+        //==================================================
+
+        IPool aavePool =
+            IPool(
+                aaveAddressesProvider.getPool()
+            );
+
+
+        if(
+            address(aavePool) == address(0)
+        )
+            revert ProtocolNotConfigured();
+
+
+        //==================================================
+        // Execute flash loan
+        //
+        // IMPORTANT:
+        // Preserve the underlying revert payload.
+        //
+        // Previously a low-level revert from Aave or the
+        // callback could arrive at ethers as:
+        //
+        //     missing revert data
+        //
+        // The wrapper below gives the frontend a stable
+        // Executor error selector while preserving the
+        // original reason bytes for diagnosis.
+        //==================================================
+
+
+      try
+            aavePool.flashLoanSimple(
+                address(this),
+                asset,
+                amount,
+                params,
+                0
+            )
+            {
+                // Flash loan completed successfully.
+            }
+            catch (bytes memory reason)
+            {
+                //==================================================
+                // TEMPORARY DEBUG
+                //
+                // Preserve the original Aave / callback / DEX
+                // revert data so Remix can show the real failure.
+                //==================================================
+
+                emit FlashLoanDebugRevert(
+                    reason
+                );
+
+                assembly
+                {
+                    revert(
+                        add(reason, 32),
+                        mload(reason)
+                    )
+                }
+            }
+
 
         totalFlashLoansExecuted++;
-        emit OperationCompleted(operationCount, true);
+
+
+        emit OperationCompleted(
+            operationCount,
+            true
+        );
     }
 
-    /**
-     * @notice Execute multi-hop flash loan strategy via Balancer
-     * @param tokens Array of token addresses for flash loan
-     * @param amounts Array of amounts to flash loan
-     * @param userData Encoded operation parameters
-     */
+
+    //======================================================
+    // Execute Balancer flash loan
+    //
+    // Disabled until a verified Sepolia Balancer Vault
+    // address is configured.
+    //======================================================
+
     function executeBalancerFlashLoan(
         address[] calldata tokens,
         uint256[] calldata amounts,
         bytes calldata userData
-    ) external onlyOwner whenNotPaused {
+    )
+        external
+        onlyOwner
+        whenNotPaused
+    {
         operationCount++;
-        if (tokens.length != amounts.length) revert TokenAmountMismatch();
-        if (tokens.length == 0) revert EmptyFlashLoanRequest();
 
-        // Validate all amounts
-        for (uint256 i = 0; i < amounts.length; i++) {
-            if (!DeFiConfig.isValidFlashLoanAmount(amounts[i])) revert InvalidFlashLoanAmount();
+
+        if(
+            address(balancerVault) == address(0)
+        )
+            revert ProtocolNotConfigured();
+
+
+        if(
+            tokens.length != amounts.length
+        )
+            revert TokenAmountMismatch();
+
+
+        if(tokens.length == 0)
+            revert EmptyFlashLoanRequest();
+
+
+        IERC20[] memory tokenContracts =
+            new IERC20[](
+                tokens.length
+            );
+
+
+        for(
+            uint256 index = 0;
+            index < tokens.length;
+            index++
+        )
+        {
+            tokenContracts[index] =
+                IERC20(
+                    tokens[index]
+                );
         }
 
-        // Convert address[] to IERC20[] for Balancer
-        IERC20[] memory tokenContracts = new IERC20[](tokens.length);
-        for (uint256 i = 0; i < tokens.length; i++) {
-            tokenContracts[i] = IERC20(tokens[i]);
-        }
 
         balancerVault.flashLoan(
-            IFlashLoanRecipient(address(this)),
+            IFlashLoanRecipient(
+                address(this)
+            ),
             tokenContracts,
             amounts,
             userData
         );
 
+
         totalFlashLoansExecuted++;
-        emit OperationCompleted(operationCount, true);
+
+
+        emit OperationCompleted(
+            operationCount,
+            true
+        );
     }
 
-    /**
-     * @notice Aave flash loan callback function
-     * @dev Executed after receiving flash loaned assets
-     */
+
+    //======================================================
+    // Aave flash loan callback
+    //======================================================
+
     function executeOperation(
         address asset,
         uint256 amount,
         uint256 premium,
         address initiator,
         bytes calldata params
-    ) external returns (bool) {
-        // Pool can be upgraded behind the provider; validate callback against current Pool
-        if (msg.sender != aaveAddressesProvider.getPool()) revert UnauthorizedFlashLoanCallback();
-        if (initiator != address(this)) revert InvalidInitiator();
+    )
+        external
+        returns(bool)
+    {
+        IPool aavePool =
+            IPool(
+                aaveAddressesProvider.getPool()
+            );
 
-        // Decode operation parameters
-        (uint8 operationType, bytes memory operationData) = abi.decode(params, (uint8, bytes));
 
-        // Execute the arbitrage operation
-        uint256 profit = _executeArbitrageOperation(operationType, operationData, asset, amount);
-        emit ArbitrageProfit(asset, amount, profit);
-        // Optional strict profit floor (allows reverting to avoid unprofitable execution)
-        // If operationData encodes a minProfit, the operation handler will enforce it.
+        //==================================================
+        // Validate callback caller
+        //==================================================
 
-        // Calculate total repayment amount
-        uint256 totalRepayment = amount + premium;
-        if (address(this).balance < totalRepayment && IERC20(asset).balanceOf(address(this)) < totalRepayment) {
+        if(
+            msg.sender != address(aavePool)
+        )
+            revert UnauthorizedFlashLoanCallback();
+
+
+        //==================================================
+        // Validate initiator
+        //==================================================
+
+        if(
+            initiator != address(this)
+        )
+            revert InvalidInitiator();
+
+
+        //==================================================
+        // Decode operation
+        //==================================================
+
+        (
+            uint8 operationType,
+            bytes memory operationData
+        ) =
+            abi.decode(
+                params,
+                (uint8, bytes)
+            );
+
+
+        if(
+            operationType == 0 ||
+            operationType > 3
+        )
+            revert InvalidOperationType();
+
+
+        //==================================================
+        // Execute strategy
+        //==================================================
+        //
+        // Operation 3 is intentionally Aave-only.
+        //
+        // Operations 1 and 2 continue through the existing
+        // shared dispatcher. Operation 3 requires the Aave
+        // premium and post-loan balance baseline, so it is
+        // routed directly to the dedicated MEV backrun
+        // implementation.
+        //==================================================
+
+        uint256 profit;
+
+        if(operationType == 3)
+        {
+            // Capture the tokenIn balance after the flash loan
+            // arrives. This preserves any pre-existing Executor
+            // balance and prevents it from being counted as MEV
+            // profit.
+            uint256 operationStartBalance =
+                IERC20(asset).balanceOf(
+                    address(this)
+                );
+
+            profit =
+                _executeMevBackrun(
+                    operationData,
+                    asset,
+                    amount,
+                    premium,
+                    operationStartBalance
+                );
+        }
+        else
+        {
+            profit =
+                _executeArbitrageOperation(
+                    operationType,
+                    operationData,
+                    asset,
+                    amount
+                );
+        }
+
+
+        emit ArbitrageProfit(
+            asset,
+            amount,
+            profit
+        );
+
+
+        //==================================================
+        // Calculate repayment
+        //==================================================
+
+        uint256 totalRepayment =
+            amount + premium;
+
+
+        //==================================================
+        // IMPORTANT:
+        //
+        // Aave flash loan is an ERC20 asset loan.
+        //
+        // Therefore WETH must be repaid using WETH,
+        // not native ETH.
+        //==================================================
+
+        uint256 assetBalance =
+            IERC20(asset).balanceOf(
+                address(this)
+            );
+
+
+        if(
+            assetBalance < totalRepayment
+        )
             revert InsufficientRepayment();
-        }
 
-        // Approve repayment
-        if (asset == DeFiConfig.getWethAddress()) {
-            // For ETH operations, ensure sufficient balance
-            if (address(this).balance < totalRepayment) revert InsufficientEthForRepayment();
-        } else {
-            IERC20(asset).approve(aaveAddressesProvider.getPool(), totalRepayment);
-        }
 
-        emit FlashLoanExecuted(asset, amount, premium);
+        //==================================================
+        // Approve Aave Pool to pull repayment
+        //==================================================
+
+        IERC20(asset).approve(
+            address(aavePool),
+            0
+        );
+
+        IERC20(asset).approve(
+            address(aavePool),
+            totalRepayment
+        );
+
+
+        emit FlashLoanExecuted(
+            asset,
+            amount,
+            premium
+        );
+
+
         return true;
     }
 
-    /**
-     * @notice Balancer flash loan callback function
-     * @dev Executed after receiving flash loaned assets
-     */
+
+    //======================================================
+    // Balancer callback
+    //======================================================
+
     function receiveFlashLoan(
         IERC20[] memory tokens,
         uint256[] memory amounts,
         uint256[] memory feeAmounts,
         bytes memory userData
-    ) external override {
-        if (msg.sender != address(balancerVault)) revert UnauthorizedBalancerCallback();
+    )
+        external
+        override
+    {
+        if(
+            msg.sender != address(balancerVault)
+        )
+            revert UnauthorizedBalancerCallback();
 
-        // Decode operation parameters
-        (uint8 operationType, bytes memory operationData) = abi.decode(userData, (uint8, bytes));
 
-        // Execute arbitrage operation for each token
+        (
+            uint8 operationType,
+            bytes memory operationData
+        ) =
+            abi.decode(
+                userData,
+                (uint8, bytes)
+            );
+
+
         uint256 totalProfit = 0;
-        for (uint256 i = 0; i < tokens.length; i++) {
-            uint256 profit = _executeArbitrageOperation(operationType, operationData, address(tokens[i]), amounts[i]);
+
+
+        for(
+            uint256 index = 0;
+            index < tokens.length;
+            index++
+        )
+        {
+            uint256 profit =
+                _executeArbitrageOperation(
+                    operationType,
+                    operationData,
+                    address(tokens[index]),
+                    amounts[index]
+                );
+
             totalProfit += profit;
         }
 
-        // Calculate and repay flash loans
-        for (uint256 i = 0; i < tokens.length; i++) {
-            uint256 repaymentAmount = amounts[i] + feeAmounts[i];
-            if (address(tokens[i]) == DeFiConfig.getWethAddress()) {
-                if (address(this).balance < repaymentAmount) revert InsufficientEthForRepayment();
-            } else {
-                tokens[i].approve(address(balancerVault), repaymentAmount);
-            }
+
+        for(
+            uint256 index = 0;
+            index < tokens.length;
+            index++
+        )
+        {
+            uint256 repaymentAmount =
+                amounts[index] +
+                feeAmounts[index];
+
+
+            uint256 tokenBalance =
+                tokens[index].balanceOf(
+                    address(this)
+                );
+
+
+            if(
+                tokenBalance <
+                repaymentAmount
+            )
+                revert InsufficientRepayment();
+
+
+            tokens[index].approve(
+                address(balancerVault),
+                0
+            );
+
+            tokens[index].approve(
+                address(balancerVault),
+                repaymentAmount
+            );
         }
 
-        emit FlashLoanExecuted(address(tokens[0]), amounts[0], feeAmounts[0]); // Log primary asset
+
+        emit FlashLoanExecuted(
+            address(tokens[0]),
+            amounts[0],
+            feeAmounts[0]
+        );
     }
 
-    /**
-     * @notice Internal function to execute arbitrage operations
-     * @param operationType Type of operation to execute
-     * @param operationData Encoded operation parameters
-     * @param asset Asset address
-     * @param amount Asset amount
-     * @return Profit generated from the operation
-     */
+
+    //======================================================
+    // Execute arbitrage operation
+    //======================================================
+
     function _executeArbitrageOperation(
         uint8 operationType,
         bytes memory operationData,
         address asset,
         uint256 amount
-    ) internal returns (uint256) {
-        if (operationType == 1) {
-            // DEX arbitrage
-            return _executeDexArbitrage(operationData, asset, amount);
-        } else if (operationType == 2) {
-            // Liquidation operation
-            return _executeLiquidation(operationData, asset, amount);
+    )
+        internal
+        returns(uint256)
+    {
+        if(operationType == 1)
+        {
+            return
+                _executeDexArbitrage(
+                    operationData,
+                    asset,
+                    amount
+                );
         }
-        return 0;
+
+
+        if(operationType == 2)
+        {
+            return
+                _executeLiquidation(
+                    operationData,
+                    asset,
+                    amount
+                );
+        }
+
+
+        // Operation 3 is intentionally excluded from this
+        // shared dispatcher. It is Aave-only and is routed
+        // directly from executeOperation().
+        revert InvalidOperationType();
     }
 
-    /**
-     * @notice Execute DEX arbitrage between Uniswap and SushiSwap
-     */
+
+    //======================================================
+    // DEX arbitrage
+    //
+    // operationData:
+    //
+    // (
+    //   uint8 firstDex,
+    //   address tokenIn,
+    //   address tokenOut,
+    //   uint24 uniFee,
+    //   uint256 minOut1,
+    //   uint256 minOut2,
+    //   uint256 minProfit
+    // )
+    //
+    // firstDex:
+    // 0 = Uniswap → V2-compatible DEX
+    // 1 = V2-compatible DEX → Uniswap
+    //======================================================
+
     function _executeDexArbitrage(
         bytes memory operationData,
-        address /*asset*/,
+        address asset,
         uint256 amount
-    ) internal returns (uint256) {
-        /**
-         * operationData encoding:
-         * (uint8 firstDex, address tokenIn, address tokenOut, uint24 uniFee, uint256 minOut1, uint256 minOut2, uint256 minProfit)
-         * - firstDex: 0 = UniswapV3 then SushiV2, 1 = SushiV2 then UniswapV3
-         * - uniFee: Uniswap V3 fee tier (500, 3000, 10000)
-         * - tokenIn -> tokenOut (leg1), then tokenOut -> tokenIn (leg2) to close the loop
-         * Profit is computed as delta of tokenIn balance.
-         */
-        (uint8 firstDex, address tokenIn, address tokenOut, uint24 uniFee, uint256 minOut1, uint256 minOut2, uint256 minProfit) =
-            abi.decode(operationData, (uint8, address, address, uint24, uint256, uint256, uint256));
+    )
+        internal
+        returns(uint256)
+    {
+        (
+            uint8 firstDex,
+            address tokenIn,
+            address tokenOut,
+            uint24 uniFee,
+            uint256 minOut1,
+            uint256 minOut2,
+            uint256 minProfit
+        ) =
+            abi.decode(
+                operationData,
+                (
+                    uint8,
+                    address,
+                    address,
+                    uint24,
+                    uint256,
+                    uint256,
+                    uint256
+                )
+            );
 
-        uint256 balBefore = IERC20(tokenIn).balanceOf(address(this));
 
+        //==================================================
+        // Validate operation
+        //==================================================
+
+        if(
+            tokenIn == address(0)
+        )
+            revert InvalidTokenIn();
+
+
+        if(
+            tokenOut == address(0)
+        )
+            revert InvalidTokenOut();
+
+
+        if(
+            tokenIn == tokenOut
+        )
+            revert InvalidTokenOut();
+
+
+        // The flash-loan asset must be tokenIn.
+        if(
+            asset != tokenIn
+        )
+            revert InvalidTokenIn();
+
+
+        if(
+            firstDex > 1
+        )
+            revert InvalidOperationType();
+
+
+        //==================================================
+        // Record tokenIn balance before swaps
+        //
+        // We measure profit relative to the amount borrowed,
+        // rather than counting unrelated pre-existing funds.
+        //==================================================
+
+        uint256 balanceBefore =
+            IERC20(tokenIn).balanceOf(
+                address(this)
+            );
+
+
+        if(
+            balanceBefore < amount
+        )
+            revert InsufficientBalance();
+
+
+        //==================================================
         // Leg 1
+        //==================================================
+
         uint256 out1;
-        if (firstDex == 0) {
-            out1 = _swapOnUniswap(tokenIn, tokenOut, uniFee, amount, minOut1);
-        } else {
-            uint256[] memory amounts1 = _swapOnSushiswap(tokenIn, tokenOut, amount, minOut1);
-            out1 = amounts1[1];
-        }
-        totalSwapsExecuted++;
-        emit SwapExecuted(tokenIn, tokenOut, amount, out1);
 
-        // Leg 2 (close cycle)
+
+        if(firstDex == 0)
+            {
+                try
+                    this._debugSwapOnUniswap(
+                        tokenIn,
+                        tokenOut,
+                        uniFee,
+                        amount,
+                        minOut1
+                    )
+                    returns(uint256 swapAmount)
+                {
+                    out1 = swapAmount;
+                }
+                catch (bytes memory reason)
+                {
+                    emit FlashLoanDebugRevert(reason);
+
+                    assembly
+                    {
+                        revert(
+                            add(reason, 32),
+                            mload(reason)
+                        )
+                    }
+                }
+            }
+            else
+            {
+                try
+                    this._debugSwapOnSushiswap(
+                        tokenIn,
+                        tokenOut,
+                        amount,
+                        minOut1
+                    )
+                    returns(uint256 swapAmount)
+                {
+                    out1 = swapAmount;
+                }
+                catch
+                {
+                    revert ArbitrageLegFailed(1);
+                }
+            }
+
+
+        totalSwapsExecuted++;
+
+
+        emit SwapExecuted(
+            tokenIn,
+            tokenOut,
+            amount,
+            out1
+        );
+
+
+        //==================================================
+        // Leg 2
+        //==================================================
+
         uint256 out2;
-        if (firstDex == 0) {
-            uint256[] memory amounts2 = _swapOnSushiswap(tokenOut, tokenIn, out1, minOut2);
-            out2 = amounts2[1];
-        } else {
-            out2 = _swapOnUniswap(tokenOut, tokenIn, uniFee, out1, minOut2);
-        }
-        totalSwapsExecuted++;
-        emit SwapExecuted(tokenOut, tokenIn, out1, out2);
 
-        uint256 balAfter = IERC20(tokenIn).balanceOf(address(this));
-        uint256 realized = balAfter > balBefore ? balAfter - balBefore : 0;
-        if (realized < minProfit) revert ArbProfitBelowMinProfit();
-        return realized;
+
+        if(firstDex == 0)
+        {
+            try
+                this._debugSwapOnSushiswap(
+                    tokenOut,
+                    tokenIn,
+                    out1,
+                    minOut2
+                )
+                returns(uint256 swapAmount)
+            {
+                out2 = swapAmount;
+            }
+            catch
+            {
+                revert ArbitrageLegFailed(2);
+            }
+        }
+        else
+        {
+            try
+                this._debugSwapOnUniswap(
+                    tokenOut,
+                    tokenIn,
+                    uniFee,
+                    out1,
+                    minOut2
+                )
+                returns(uint256 swapAmount)
+            {
+                out2 = swapAmount;
+            }
+            catch
+            {
+                revert ArbitrageLegFailed(2);
+            }
+        }
+
+
+        totalSwapsExecuted++;
+
+
+        emit SwapExecuted(
+            tokenOut,
+            tokenIn,
+            out1,
+            out2
+        );
+
+
+        //==================================================
+        // Calculate arbitrage profit
+        //
+        // The cycle should return at least:
+        //
+        // amount + minProfit
+        //
+        // We intentionally don't count unrelated tokenIn
+        // balance as arbitrage profit.
+        //==================================================
+
+        if(
+            out2 <
+            amount + minProfit
+        )
+            revert ArbProfitBelowMinProfit();
+
+
+        uint256 realizedProfit =
+            out2 - amount;
+
+
+        return realizedProfit;
     }
 
-    /**
-     * @notice Execute liquidation operation
-     */
+
+    //======================================================
+    // MEV backrun
+    //
+    // operationData:
+    //
+    // (
+    //   uint8 dex1,
+    //   uint8 dex2,
+    //   address tokenIn,
+    //   address tokenOut,
+    //   uint24 uniFee1,
+    //   uint24 uniFee2,
+    //   uint256 minOut1,
+    //   uint256 minOut2,
+    //   uint256 minProfit
+    // )
+    //
+    // dex selector:
+    // 0 = Uniswap V3
+    // 1 = SushiSwap V2
+    //
+    // The route is always:
+    //
+    // tokenIn -> tokenOut -> tokenIn
+    //
+    // asset and amount come from the outer flash loan.
+    //======================================================
+
+    function _executeMevBackrun(
+        bytes memory operationData,
+        address asset,
+        uint256 amount,
+        uint256 premium,
+        uint256 operationStartBalance
+    )
+        internal
+        returns(uint256)
+    {
+        (
+            uint8 dex1,
+            uint8 dex2,
+            address tokenIn,
+            address tokenOut,
+            uint24 uniFee1,
+            uint24 uniFee2,
+            uint256 minOut1,
+            uint256 minOut2,
+            uint256 minProfit
+        ) =
+            abi.decode(
+                operationData,
+                (
+                    uint8,
+                    uint8,
+                    address,
+                    address,
+                    uint24,
+                    uint24,
+                    uint256,
+                    uint256,
+                    uint256
+                )
+            );
+
+
+        //==================================================
+        // Validate operation
+        //==================================================
+
+        if(
+            dex1 > 1 ||
+            dex2 > 1
+        )
+            revert InvalidOperationType();
+
+
+        if(
+            tokenIn == address(0)
+        )
+            revert InvalidTokenIn();
+
+
+        if(
+            tokenOut == address(0)
+        )
+            revert InvalidTokenOut();
+
+
+        if(
+            tokenIn == tokenOut
+        )
+            revert InvalidTokenOut();
+
+
+        // The flash-loan asset must be tokenIn.
+        if(
+            asset != tokenIn
+        )
+            revert InvalidTokenIn();
+
+
+        if(
+            minOut1 == 0 ||
+            minOut2 == 0
+        )
+            revert InvalidAmount();
+
+
+        // A selected Uniswap V3 leg must have a non-zero
+        // fee tier. The field is ignored for SushiSwap legs.
+        if(
+            dex1 == 0 &&
+            uniFee1 == 0
+        )
+            revert InvalidAmount();
+
+
+        if(
+            dex2 == 0 &&
+            uniFee2 == 0
+        )
+            revert InvalidAmount();
+
+
+        //==================================================
+        // Validate the flash-loan balance baseline
+        //==================================================
+
+        uint256 balanceBefore =
+            IERC20(tokenIn).balanceOf(
+                address(this)
+            );
+
+
+        if(
+            balanceBefore < amount
+        )
+            revert InsufficientBalance();
+
+
+        // The caller supplies the balance observed after the
+        // flash loan arrived. It must still match the current
+        // balance before swaps begin.
+        if(
+            operationStartBalance != balanceBefore
+        )
+            revert InsufficientBalance();
+
+
+        //==================================================
+        // Leg 1
+        //==================================================
+
+        uint256 out1;
+
+
+        if(dex1 == 0)
+        {
+            try
+                this._debugSwapOnUniswap(
+                    tokenIn,
+                    tokenOut,
+                    uniFee1,
+                    amount,
+                    minOut1
+                )
+                returns(uint256 swapAmount)
+            {
+                out1 = swapAmount;
+            }
+            catch
+            {
+                revert ArbitrageLegFailed(1);
+            }
+        }
+        else
+        {
+            try
+                this._debugSwapOnSushiswap(
+                    tokenIn,
+                    tokenOut,
+                    amount,
+                    minOut1
+                )
+                returns(uint256 swapAmount)
+            {
+                out1 = swapAmount;
+            }
+            catch
+            {
+                revert ArbitrageLegFailed(1);
+            }
+        }
+
+
+        totalSwapsExecuted++;
+
+
+        emit SwapExecuted(
+            tokenIn,
+            tokenOut,
+            amount,
+            out1
+        );
+
+
+        //==================================================
+        // Leg 2
+        //==================================================
+
+        uint256 out2;
+
+
+        if(dex2 == 0)
+        {
+            try
+                this._debugSwapOnUniswap(
+                    tokenOut,
+                    tokenIn,
+                    uniFee2,
+                    out1,
+                    minOut2
+                )
+                returns(uint256 swapAmount)
+            {
+                out2 = swapAmount;
+            }
+            catch
+            {
+                revert ArbitrageLegFailed(2);
+            }
+        }
+        else
+        {
+            try
+                this._debugSwapOnSushiswap(
+                    tokenOut,
+                    tokenIn,
+                    out1,
+                    minOut2
+                )
+                returns(uint256 swapAmount)
+            {
+                out2 = swapAmount;
+            }
+            catch
+            {
+                revert ArbitrageLegFailed(2);
+            }
+        }
+
+
+        totalSwapsExecuted++;
+
+
+        emit SwapExecuted(
+            tokenOut,
+            tokenIn,
+            out1,
+            out2
+        );
+
+
+        //==================================================
+        // Calculate realized MEV profit
+        //
+        // Existing tokenIn held by the Executor is preserved.
+        // The final balance must cover:
+        //
+        // operationStartBalance
+        // + Aave premium
+        // + minimum MEV profit.
+        //==================================================
+
+        uint256 finalBalance =
+            IERC20(tokenIn).balanceOf(
+                address(this)
+            );
+
+
+        uint256 requiredBalance =
+            operationStartBalance +
+            premium +
+            minProfit;
+
+
+        if(
+            finalBalance < requiredBalance
+        )
+            revert ArbProfitBelowMinProfit();
+
+
+        uint256 realizedProfit =
+            finalBalance -
+            operationStartBalance -
+            premium;
+
+
+        return realizedProfit;
+    }
+
+
+    //======================================================
+    // Liquidation
+    //======================================================
+
     function _executeLiquidation(
         bytes memory operationData,
-        address /*asset*/,
+        address asset,
         uint256 amount
-    ) internal returns (uint256) {
-        /**
-         * operationData encoding:
-         * (address user, address debtAsset, address collateralAsset, uint256 debtToCover, bool receiveAToken, uint256 minCollateralOut)
-         *
-         * Notes:
-         * - Caller must ensure this contract holds `debtAsset` (typically from flash loan) and has approved Aave Pool.
-         * - Profit is estimated as delta of collateralAsset balance (best-effort, depends on liquidation params).
-         */
-        (address user, address debtAsset, address collateralAsset, uint256 debtToCover, bool receiveAToken, uint256 minCollateralOut) =
-            abi.decode(operationData, (address, address, address, uint256, bool, uint256));
+    )
+        internal
+        returns(uint256)
+    {
+        (
+            address user,
+            address debtAsset,
+            address collateralAsset,
+            uint256 debtToCover,
+            bool receiveAToken,
+            uint256 minCollateralOut
+        ) =
+            abi.decode(
+                operationData,
+                (
+                    address,
+                    address,
+                    address,
+                    uint256,
+                    bool,
+                    uint256
+                )
+            );
 
-        uint256 cover = debtToCover == 0 ? amount : debtToCover;
-        if (cover == 0) revert InvalidDebtToCover();
 
-        uint256 collateralBefore = IERC20(collateralAsset).balanceOf(address(this));
+        uint256 cover =
+            debtToCover == 0
+            ? amount
+            : debtToCover;
 
-        // Approve Aave Pool to pull debtAsset for liquidation
-        IERC20(debtAsset).approve(aaveAddressesProvider.getPool(), cover);
+        if(
+            cover == 0
+        )
+            revert InvalidDebtToCover();
 
-        // Execute Aave V3 liquidation
-        IPool aavePool = IPool(aaveAddressesProvider.getPool());
-        aavePool.liquidationCall(collateralAsset, debtAsset, user, cover, receiveAToken);
+        if(
+            asset != debtAsset
+        )
+            revert InvalidTokenIn();
 
-        uint256 collateralAfter = IERC20(collateralAsset).balanceOf(address(this));
-        emit LiquidationExecuted(user, debtAsset, collateralAsset, cover, receiveAToken);
+        if(
+            cover > amount
+        )
+            revert InvalidDebtToCover();
 
-        uint256 collateralDelta = collateralAfter > collateralBefore ? collateralAfter - collateralBefore : 0;
-        if (collateralDelta < minCollateralOut) revert LiquidationBelowMinCollateralOut();
+
+        if(
+            user == address(0)
+        )
+            revert InvalidRecipient();
+
+
+        if(
+            debtAsset == address(0) ||
+            collateralAsset == address(0)
+        )
+            revert InvalidTokenAddress();
+
+
+        if(
+            debtAsset == collateralAsset
+        )
+            revert InvalidTokenIn();
+
+
+        uint256 collateralBefore =
+            IERC20(collateralAsset)
+                .balanceOf(
+                    address(this)
+                );
+
+
+        IPool aavePool =
+            IPool(
+                aaveAddressesProvider.getPool()
+            );
+
+
+        IERC20(debtAsset).approve(
+            address(aavePool),
+            0
+        );
+
+
+        IERC20(debtAsset).approve(
+            address(aavePool),
+            cover
+        );
+
+
+        aavePool.liquidationCall(
+            collateralAsset,
+            debtAsset,
+            user,
+            cover,
+            receiveAToken
+        );
+
+
+        uint256 collateralAfter =
+            IERC20(collateralAsset)
+                .balanceOf(
+                    address(this)
+                );
+
+
+        emit LiquidationExecuted(
+            user,
+            debtAsset,
+            collateralAsset,
+            cover,
+            receiveAToken
+        );
+
+
+        uint256 collateralDelta =
+            collateralAfter >
+            collateralBefore
+            ? collateralAfter -
+              collateralBefore
+            : 0;
+
+
+        if(
+            collateralDelta <
+            minCollateralOut
+        )
+            revert LiquidationBelowMinCollateralOut();
+
+
         return collateralDelta;
     }
 
-    /**
-     * @notice Execute swap on Uniswap V3
-     * @param tokenIn Input token address
-     * @param tokenOut Output token address
-     * @param amountIn Amount of input token
-     * @param amountOutMin Minimum output amount
-     * @return amountOut Actual output amount received
-     */
+
+    //======================================================
+    // Uniswap V3 swap via SwapRouter02
+    //
+    // IMPORTANT:
+    // SwapRouter02 ExactInputSingleParams does NOT contain
+    // a deadline field. The old v3-periphery ISwapRouter
+    // interface must not be used with this router.
+    //======================================================
+
     function _swapOnUniswap(
         address tokenIn,
         address tokenOut,
         uint24 fee,
         uint256 amountIn,
         uint256 amountOutMin
-    ) internal returns (uint256 amountOut) {
-        // Approve Uniswap router to spend tokens
-        IERC20(tokenIn).approve(address(uniswapRouter), amountIn);
+    )
+        internal
+        returns(uint256 amountOut)
+    {
+        IERC20(tokenIn).approve(
+            address(uniswapRouter),
+            0
+        );
 
-        // Prepare swap parameters
-        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
-            tokenIn: tokenIn,
-            tokenOut: tokenOut,
-            fee: fee,
-            recipient: address(this),
-            deadline: block.timestamp + MAX_OPERATION_DEADLINE,
-            amountIn: amountIn,
-            amountOutMinimum: amountOutMin,
-            sqrtPriceLimitX96: 0
-        });
 
-        // Execute swap
-        try uniswapRouter.exactInputSingle(params) returns (uint256 amount) {
+        IERC20(tokenIn).approve(
+            address(uniswapRouter),
+            amountIn
+        );
+
+
+        ISwapRouter02.ExactInputSingleParams memory params =
+            ISwapRouter02.ExactInputSingleParams({
+                tokenIn: tokenIn,
+                tokenOut: tokenOut,
+                fee: fee,
+                recipient: address(this),
+                amountIn: amountIn,
+                amountOutMinimum: amountOutMin,
+                sqrtPriceLimitX96: 0
+            });
+
+
+        try
+            uniswapRouter.exactInputSingle(
+                params
+            )
+            returns(uint256 amount)
+        {
             amountOut = amount;
-        } catch {
-            revert SwapFailed();
         }
+        catch (
+                bytes memory reason
+            )
+            {
+                assembly
+                {
+                    revert(
+                        add(reason, 32),
+                        mload(reason)
+                    )
+                }
+            }
     }
 
-    /**
-     * @notice Execute swap on SushiSwap V2
-     * @param tokenIn Input token address
-     * @param tokenOut Output token address
-     * @param amountIn Amount of input token
-     * @param amountOutMin Minimum output amount
-     * @return amounts Array containing input and output amounts
-     */
+
+    //======================================================
+    // V2-compatible DEX swap
+    //======================================================
+
     function _swapOnSushiswap(
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
         uint256 amountOutMin
-    ) internal returns (uint256[] memory amounts) {
-        // Approve SushiSwap router
-        IERC20(tokenIn).approve(address(sushiswapRouter), amountIn);
+    )
+        internal
+        returns(uint256[] memory amounts)
+    {
+        IERC20(tokenIn).approve(
+            address(sushiswapRouter),
+            0
+        );
 
-        address[] memory path = new address[](2);
+
+        IERC20(tokenIn).approve(
+            address(sushiswapRouter),
+            amountIn
+        );
+
+
+        address[] memory path =
+            new address[](2);
+
+
         path[0] = tokenIn;
+
         path[1] = tokenOut;
 
-        // Execute swap
-        try sushiswapRouter.swapExactTokensForTokens(
-            amountIn,
-            amountOutMin,
-            path,
-            address(this),
-            block.timestamp + MAX_OPERATION_DEADLINE
-        ) returns (uint256[] memory result) {
+
+        try
+            sushiswapRouter.swapExactTokensForTokens(
+                amountIn,
+                amountOutMin,
+                path,
+                address(this),
+                block.timestamp +
+                    MAX_OPERATION_DEADLINE
+            )
+            returns(uint256[] memory result)
+        {
             amounts = result;
-        } catch {
-            revert SwapFailed();
         }
+        catch (
+                bytes memory reason
+            )
+            {
+                assembly
+                {
+                    revert(
+                        add(reason, 32),
+                        mload(reason)
+                    )
+                }
+            }
     }
 
-    /**
-     * @notice Public function to execute token swap
-     * @param dexSelector 0 for Uniswap, 1 for SushiSwap
-     * @param tokenIn Input token
-     * @param tokenOut Output token
-     * @param amountIn Input amount
-     * @param amountOutMin Minimum output amount
-     */
+
+    //======================================================
+    // Internal swap diagnostics
+    //
+    // These wrappers are intentionally restricted to calls
+    // from this contract. They allow _executeDexArbitrage()
+    // to catch a failing DEX call and identify the exact leg.
+    //======================================================
+
+    function _debugSwapOnUniswap(
+        address tokenIn,
+        address tokenOut,
+        uint24 fee,
+        uint256 amountIn,
+        uint256 amountOutMin
+    )
+        external
+        returns(uint256)
+    {
+        if(msg.sender != address(this))
+            revert UnauthorizedAccess();
+
+        return
+            _swapOnUniswap(
+                tokenIn,
+                tokenOut,
+                fee,
+                amountIn,
+                amountOutMin
+            );
+    }
+
+
+    function _debugSwapOnSushiswap(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOutMin
+    )
+        external
+        returns(uint256)
+    {
+        if(msg.sender != address(this))
+            revert UnauthorizedAccess();
+
+        uint256[] memory amounts =
+            _swapOnSushiswap(
+                tokenIn,
+                tokenOut,
+                amountIn,
+                amountOutMin
+            );
+
+        if(amounts.length < 2)
+            revert InvalidSwapResult();
+
+        return
+            amounts[
+                amounts.length - 1
+            ];
+    }
+
+
+    //======================================================
+    // Direct token swap
+    //======================================================
+
     function executeSwap(
         uint8 dexSelector,
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
         uint256 amountOutMin
-    ) external onlyOwner whenNotPaused validAmount(amountIn) {
+    )
+        external
+        onlyOwner
+        whenNotPaused
+        validAmount(amountIn)
+    {
         operationCount++;
 
+
         uint256 amountOut;
-        if (dexSelector == 0) {
-            amountOut = _swapOnUniswap(tokenIn, tokenOut, 3000, amountIn, amountOutMin);
-        } else if (dexSelector == 1) {
-            uint256[] memory amounts = _swapOnSushiswap(tokenIn, tokenOut, amountIn, amountOutMin);
-            amountOut = amounts[1];
-        } else {
-            revert("Invalid DEX selector");
+
+
+        if(dexSelector == 0)
+        {
+            amountOut =
+                _swapOnUniswap(
+                    tokenIn,
+                    tokenOut,
+                    3000,
+                    amountIn,
+                    amountOutMin
+                );
         }
+        else if(dexSelector == 1)
+        {
+            uint256[] memory amounts =
+                _swapOnSushiswap(
+                    tokenIn,
+                    tokenOut,
+                    amountIn,
+                    amountOutMin
+                );
+
+
+            amountOut =
+                amounts[
+                    amounts.length - 1
+                ];
+        }
+        else
+        {
+            revert InvalidOperationType();
+        }
+
 
         totalSwapsExecuted++;
-        emit SwapExecuted(tokenIn, tokenOut, amountIn, amountOut);
-        emit OperationCompleted(operationCount, true);
-    }
 
-    /**
-     * @notice Withdraw ETH from contract
-     * @param to Recipient address
-     */
-    function withdrawEth(address to) external nonReentrant whenNotPaused {
-        require(
-            msg.sender == owner || (msg.sender == swapContract && swapContractWithdrawEnabled),
-            "Unauthorized withdrawal"
+
+        emit SwapExecuted(
+            tokenIn,
+            tokenOut,
+            amountIn,
+            amountOut
         );
-        if (to == address(0)) revert InvalidRecipient();
-        uint256 balance = address(this).balance;
-        if (balance == 0) revert NoEthBalance();
 
-        (bool success, ) = payable(to).call{value: balance}("");
-        if (!success) revert ExternalCallFailed();
 
-        emit EthWithdrawn(to, balance);
-    }
-
-    /**
-     * @notice Withdraw ERC20 tokens from contract
-     * @param tokenAddress Address of token to withdraw
-     * @param to Recipient address
-     */
-    function withdrawToken(address tokenAddress, address to) external nonReentrant whenNotPaused {
-        require(
-            msg.sender == owner || (msg.sender == swapContract && swapContractWithdrawEnabled),
-            "Unauthorized withdrawal"
+        emit OperationCompleted(
+            operationCount,
+            true
         );
-        if (to == address(0)) revert InvalidRecipient();
-        if (tokenAddress == address(0)) revert InvalidTokenAddress();
-
-        IERC20 token = IERC20(tokenAddress);
-        uint256 balance = token.balanceOf(address(this));
-        if (balance == 0) revert NoTokenBalance();
-
-        bool success = token.transfer(to, balance);
-        if (!success) revert ExternalCallFailed();
-
-        emit WithdrawalExecuted(tokenAddress, to, balance);
     }
 
-    /**
-     * @notice Emergency token recovery function
-     * @param tokenAddress Token to recover
-     * @param amount Amount to recover
-     */
-    function emergencyTokenRecovery(address tokenAddress, uint256 amount) external onlyOwner {
-        if (tokenAddress == address(0)) revert InvalidTokenAddress();
-        if (amount == 0) revert InvalidRecoveryAmount();
 
-        IERC20 token = IERC20(tokenAddress);
-        uint256 balance = token.balanceOf(address(this));
-        if (balance < amount) revert InsufficientTokenBalance();
+    //======================================================
+    // Withdraw ETH
+    //======================================================
 
-        bool success = token.transfer(owner, amount);
-        if (!success) revert ExternalCallFailed();
+    function withdrawEth(
+        address to
+    )
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        if(
+            msg.sender != owner &&
+            !(
+                msg.sender == swapContract &&
+                swapContract != address(0) &&
+                swapContractWithdrawEnabled
+            )
+        )
+            revert UnauthorizedAccess();
+
+
+        if(
+            to == address(0)
+        )
+            revert InvalidRecipient();
+
+
+        uint256 balance =
+            address(this).balance;
+
+
+        if(
+            balance == 0
+        )
+            revert NoEthBalance();
+
+
+        (
+            bool success,
+        ) =
+            payable(to).call{
+                value: balance
+            }("");
+
+
+        if(!success)
+            revert ExternalCallFailed();
+
+
+        emit EthWithdrawn(
+            to,
+            balance
+        );
     }
 
-    /**
-     * @notice Get token balance of the contract
-     * @param tokenAddress Token address
-     * @return Balance of the token
-     */
-    function getTokenBalance(address tokenAddress) external view returns (uint256) {
-        return IERC20(tokenAddress).balanceOf(address(this));
+
+    //======================================================
+    // Withdraw ERC20 tokens
+    //======================================================
+
+    function withdrawToken(
+        address tokenAddress,
+        address to
+    )
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        if(
+            msg.sender != owner &&
+            !(
+                msg.sender == swapContract &&
+                swapContract != address(0) &&
+                swapContractWithdrawEnabled
+            )
+        )
+            revert UnauthorizedAccess();
+
+
+        if(
+            to == address(0)
+        )
+            revert InvalidRecipient();
+
+
+        if(
+            tokenAddress == address(0)
+        )
+            revert InvalidTokenAddress();
+
+
+        IERC20 token =
+            IERC20(tokenAddress);
+
+
+        uint256 balance =
+            token.balanceOf(
+                address(this)
+            );
+
+
+        if(
+            balance == 0
+        )
+            revert NoTokenBalance();
+
+
+        bool success =
+            token.transfer(
+                to,
+                balance
+            );
+
+
+        if(!success)
+            revert ExternalCallFailed();
+
+
+        emit WithdrawalExecuted(
+            tokenAddress,
+            to,
+            balance
+        );
     }
 
-    receive() external payable {}
+    //======================================================
+    // Convert All WETH -> Native ETH
+    //
+    // Safety:
+    // - Owner only
+    // - Contract must not be paused
+    // - Executor WETH balance must be >= 0.01 WETH
+    // - Entire WETH balance is converted
+    // - Resulting native ETH is sent to owner
+    //
+    // WETH and native ETH are separate assets.
+    // WETH.withdraw() unwraps WETH 1:1 into native ETH.
+    //======================================================
 
-    /**
-     * @notice Fallback function with enhanced operation handling
-     */
-    fallback() external payable {
-        bytes4 sig = msg.sig;
+    function withdrawWETHAsETH()
+        external
+        onlyOwner
+        nonReentrant
+        whenNotPaused
+    {
+        //==================================================
+        // Configured Sepolia WETH
+        // 0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14
+        //==================================================
 
-        // Handle ETH withdrawal
-        if (msg.sender == swapContract && sig == _WITHDRAW_ETH_SIG) {
-            address to = abi.decode(msg.data[4:], (address));
+        address wethAddress =
+            0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14;
+
+        if(
+            wethAddress == address(0)
+        )
+            revert InvalidTokenAddress();
+
+
+        //==================================================
+        // Read complete Executor WETH balance
+        //==================================================
+
+        IERC20 weth =
+            IERC20(wethAddress);
+
+        uint256 wethBalance =
+            weth.balanceOf(
+                address(this)
+            );
+
+
+        //==================================================
+        // Require minimum 0.01 WETH
+        //
+        // 0.01 WETH =
+        // 10000000000000000 wei
+        //==================================================
+
+        uint256 minimumWETH =
+            0.01 ether;
+
+
+        if(
+            wethBalance < minimumWETH
+        )
+            revert InsufficientWETHBalance();
+
+
+        //==================================================
+        // Unwrap ALL WETH
+        //==================================================
+
+        IWETHUnwrap(wethAddress).withdraw(
+            wethBalance
+        );
+
+
+        //==================================================
+        // Send resulting native ETH to owner
+        //==================================================
+
+        (
+            bool success,
+        ) =
+            payable(owner).call{
+                value: wethBalance
+            }("");
+
+
+        if(!success)
+            revert ExternalCallFailed();
+
+
+        //==================================================
+        // Emit conversion event
+        //==================================================
+
+        emit WETHConvertedToETH(
+            owner,
+            wethBalance
+        );
+    }
+
+
+    //======================================================
+    // Emergency token recovery
+    //======================================================
+
+    function emergencyTokenRecovery(
+        address tokenAddress,
+        uint256 amount
+    )
+        external
+        onlyOwner
+    {
+        if(
+            tokenAddress == address(0)
+        )
+            revert InvalidTokenAddress();
+
+
+        if(
+            amount == 0
+        )
+            revert InvalidRecoveryAmount();
+
+
+        IERC20 token =
+            IERC20(tokenAddress);
+
+
+        uint256 balance =
+            token.balanceOf(
+                address(this)
+            );
+
+
+        if(
+            balance < amount
+        )
+            revert InsufficientTokenBalance();
+
+
+        bool success =
+            token.transfer(
+                owner,
+                amount
+            );
+
+
+        if(!success)
+            revert ExternalCallFailed();
+    }
+
+
+    //======================================================
+    // Get token balance
+    //======================================================
+
+    function getTokenBalance(
+        address tokenAddress
+    )
+        external
+        view
+        returns(uint256)
+    {
+        return
+            IERC20(tokenAddress)
+                .balanceOf(
+                    address(this)
+                );
+    }
+
+
+    //======================================================
+    // Receive native ETH
+    //======================================================
+
+    receive()
+        external
+        payable
+    {}
+
+
+    //======================================================
+    // Fallback
+    //======================================================
+
+    fallback()
+        external
+        payable
+    {
+        bytes4 sig =
+            msg.sig;
+
+
+        if(
+            msg.sender == swapContract &&
+            swapContract != address(0) &&
+            sig == _WITHDRAW_ETH_SIG
+        )
+        {
+            address to =
+                abi.decode(
+                    msg.data[4:],
+                    (address)
+                );
+
+
             this.withdrawEth(to);
+
             return;
         }
 
-        // Handle token withdrawal
-        if (msg.sender == swapContract && sig == _WITHDRAW_TOKEN_SIG) {
-            (address tokenAddress, address to) = abi.decode(msg.data[4:], (address, address));
-            this.withdrawToken(tokenAddress, to);
+
+        if(
+            msg.sender == swapContract &&
+            swapContract != address(0) &&
+            sig == _WITHDRAW_TOKEN_SIG
+        )
+        {
+            (
+                address tokenAddress,
+                address to
+            ) =
+                abi.decode(
+                    msg.data[4:],
+                    (address, address)
+                );
+
+
+            this.withdrawToken(
+                tokenAddress,
+                to
+            );
+
             return;
         }
 
-        revert("Unsupported operation");
+
+        revert(
+            "Unsupported operation"
+        );
     }
 
-    /**
-     * @notice Get operation statistics
-     * @return totalOps Total operations executed
-     * @return flashLoans Total flash loans executed
-     * @return swaps Total swaps executed
-     */
-    function getOperationStats() external view returns (
-        uint256 totalOps,
-        uint256 flashLoans,
-        uint256 swaps
-    ) {
-        return (operationCount, totalFlashLoansExecuted, totalSwapsExecuted);
+
+    //======================================================
+    // Operation statistics
+    //======================================================
+
+    function getOperationStats()
+        external
+        view
+        returns(
+            uint256 totalOps,
+            uint256 flashLoans,
+            uint256 swaps
+        )
+    {
+        return(
+            operationCount,
+            totalFlashLoansExecuted,
+            totalSwapsExecuted
+        );
     }
 
-    /**
-     * @notice Check if token is approved for spending by a DEX
-     * @param token Token address
-     * @param dex DEX address (0 for Uniswap, 1 for SushiSwap)
-     * @return Allowance amount
-     */
-    function getTokenAllowance(address token, uint8 dex) external view returns (uint256) {
-        address spender = dex == 0 ? address(uniswapRouter) : address(sushiswapRouter);
-        return IERC20(token).allowance(address(this), spender);
+
+    //======================================================
+    // Token allowance
+    //======================================================
+
+    function getTokenAllowance(
+        address token,
+        uint8 dex
+    )
+        external
+        view
+        returns(uint256)
+    {
+        address spender;
+
+
+        if(dex == 0)
+        {
+            spender =
+                address(uniswapRouter);
+        }
+        else if(dex == 1)
+        {
+            spender =
+                address(sushiswapRouter);
+        }
+        else
+        {
+            return 0;
+        }
+
+
+        return
+            IERC20(token).allowance(
+                address(this),
+                spender
+            );
     }
 
-    /**
-     * @notice Transfer ownership of the contract
-     * @param newOwner New owner address
-     */
-    function transferOwnership(address newOwner) external onlyOwner {
-        if (newOwner == address(0)) revert InvalidNewOwner();
+
+    //======================================================
+    // Ownership
+    //======================================================
+
+    function transferOwnership(
+        address newOwner
+    )
+        external
+        onlyOwner
+    {
+        if(
+            newOwner == address(0)
+        )
+            revert InvalidNewOwner();
+
+
         owner = newOwner;
     }
 
-    /**
-     * @notice Get protocol addresses for verification
-     */
-    function getProtocolAddresses() external view returns (
-        address aavePool,
-        address aaveProvider,
-        address balancer,
-        address uniswap,
-        address sushiswap,
-        address master
-    ) {
-        return (
+
+    //======================================================
+    // Protocol addresses
+    //======================================================
+
+    function getProtocolAddresses()
+        external
+        view
+        returns(
+            address aavePool,
+            address aaveProvider,
+            address balancer,
+            address uniswap,
+            address sushiswap,
+            address master
+        )
+    {
+        return(
             aaveAddressesProvider.getPool(),
             address(aaveAddressesProvider),
             address(balancerVault),
@@ -736,16 +2487,25 @@ contract Executor is IFlashLoanRecipient {
         );
     }
 
-    /**
-     * @notice Validate operation parameters
-     * @param amount Operation amount
-     * @param deadline Operation deadline
-     * @return True if parameters are valid
-     */
-    function validateOperation(uint256 amount, uint256 deadline) external view returns (bool) {
-        return amount >= MIN_OPERATION_AMOUNT &&
-               deadline > block.timestamp &&
-               deadline <= block.timestamp + MAX_OPERATION_DEADLINE &&
-               !paused;
+
+    //======================================================
+    // Validate operation
+    //======================================================
+
+    function validateOperation(
+        uint256 amount,
+        uint256 deadline
+    )
+        external
+        view
+        returns(bool)
+    {
+        return
+            amount >= MIN_OPERATION_AMOUNT &&
+            deadline > block.timestamp &&
+            deadline <=
+                block.timestamp +
+                MAX_OPERATION_DEADLINE &&
+            !paused;
     }
 }
